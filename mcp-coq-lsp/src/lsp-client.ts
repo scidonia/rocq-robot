@@ -39,6 +39,12 @@ export class RocqLspClient {
       throw new Error('LSP client already started');
     }
 
+    // Log the command being executed for debugging
+    console.error('[lsp-client] Starting LSP process:');
+    console.error('[lsp-client]   Command:', this.config.rocqLspPath);
+    console.error('[lsp-client]   Args:', this.config.rocqLspArgs);
+    console.error('[lsp-client]   CWD:', this.config.workspaceRoot);
+
     // Spawn rocq-lsp process
     this.process = spawn(this.config.rocqLspPath, this.config.rocqLspArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],

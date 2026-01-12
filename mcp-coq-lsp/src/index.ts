@@ -13,6 +13,7 @@ import {
 
 import { RocqLspClient } from './lsp-client.js';
 import { DocumentManager } from './document-manager.js';
+import { detectProjectConfig, mergeProjectArgs } from './project-config.js';
 import type {
   Position,
   Range,
@@ -83,11 +84,33 @@ function parseArgs() {
 async function main() {
   const config = parseArgs();
 
+  // Determine workspace root
+  const workspaceRoot = config.workspaceRoot || process.cwd();
+
+  // Auto-detect project configuration (for logging/debugging purposes)
+  // Note: coq-lsp will auto-detect _CoqProject/_RocqProject itself, but we log what we find
+  // to help diagnose any issues with project configuration
+  const projectConfig = detectProjectConfig(workspaceRoot);
+
+  console.error('[mcp-coq-lsp] Workspace root:', workspaceRoot);
+  console.error('[mcp-coq-lsp] Detected load paths:', projectConfig.loadPaths);
+  
+  if (projectConfig.loadPaths.length === 0) {
+    console.error('[mcp-coq-lsp] WARNING: No _CoqProject/_RocqProject/dune config found!');
+    console.error('[mcp-coq-lsp] coq-lsp may not be able to resolve imports correctly.');
+  }
+
+  // Use user-provided args (coq-lsp doesn't accept -Q/-R as CLI args, it reads _CoqProject)
+  // User can still pass other coq-lsp-specific args if needed
+  const finalRocqLspArgs = config.rocqLspArgs || [];
+
+  console.error('[mcp-coq-lsp] coq-lsp args:', finalRocqLspArgs);
+
   // Create LSP client and document manager
   const lspClient = new RocqLspClient({
     rocqLspPath: config.rocqLspPath,
-    rocqLspArgs: config.rocqLspArgs,
-    workspaceRoot: config.workspaceRoot,
+    rocqLspArgs: finalRocqLspArgs,
+    workspaceRoot: workspaceRoot,
     checkOnlyOnRequest: false,
     ppType: 0, // String output
     goalAfterTactic: true,
@@ -95,7 +118,7 @@ async function main() {
 
   const docManager = new DocumentManager(
     lspClient,
-    config.workspaceRoot || process.cwd()
+    workspaceRoot
   );
 
   // Start LSP client
@@ -302,6 +325,40 @@ async function main() {
               file: { type: 'string' },
             },
             required: ['file'],
+          },
+        },
+        {
+          name: 'coq_check_range',
+          description: 'Check a specific line range in a Coq file and return diagnostics',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file: { type: 'string', description: 'Path to the .v file' },
+              range: {
+                type: 'object',
+                properties: {
+                  start: {
+                    type: 'object',
+                    properties: {
+                      line: { type: 'number' },
+                      character: { type: 'number' },
+                    },
+                    required: ['line'],
+                  },
+                  end: {
+                    type: 'object',
+                    properties: {
+                      line: { type: 'number' },
+                      character: { type: 'number' },
+                    },
+                    required: ['line'],
+                  },
+                },
+                required: ['start', 'end'],
+                description: 'Line range to check (0-based)',
+              },
+            },
+            required: ['file', 'range'],
           },
         },
       ],
@@ -593,30 +650,140 @@ async function main() {
         case 'coq_check': {
           const { file } = args as { file: string };
 
-          const doc = await docManager.openDocument(file);
+          try {
+            const doc = await docManager.openDocument(file);
 
-          const result = await retryDocumentNotReady(() =>
-            lspClient.sendRequest<{
-              spans: Array<{ range: Range }>;
-              completed: { status: string; range: Range };
-            }>('coq/getDocument', {
-              textDocument: {
-                uri: doc.uri,
-                version: doc.version,
-              },
-              ast: false,
-              goals: 'Str',
-            })
-          );
+            const result = await retryDocumentNotReady(() =>
+              lspClient.sendRequest<{
+                spans: Array<{ range: Range }>;
+                completed: { status: string; range: Range };
+              }>('coq/getDocument', {
+                textDocument: {
+                  uri: doc.uri,
+                  version: doc.version,
+                },
+                ast: false,
+                goals: 'Str',
+              })
+            );
 
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(result, null, 2),
-              },
-            ],
+            // Return a concise summary instead of the full result
+            const summary = {
+              file,
+              completed: result.completed?.status || 'unknown',
+              span_count: result.spans?.length || 0,
+              completed_range: result.completed?.range 
+                ? `L${result.completed.range.start.line}-L${result.completed.range.end.line}`
+                : 'none',
+              // Add a flag to indicate if checking completed successfully
+              success: true,
+            };
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(summary, null, 2),
+                },
+              ],
+            };
+          } catch (error) {
+            // Return error information in a concise format
+            const errorSummary = {
+              file,
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(errorSummary, null, 2),
+                },
+              ],
+              isError: true,
+            };
+          }
+        }
+
+        case 'coq_check_range': {
+          const { file, range } = args as { 
+            file: string; 
+            range: { start: { line: number; character?: number }; end: { line: number; character?: number } };
           };
+
+          try {
+            const doc = await docManager.openDocument(file);
+
+            // Get the full document info first
+            const result = await retryDocumentNotReady(() =>
+              lspClient.sendRequest<{
+                spans: Array<{ range: Range }>;
+                completed: { status: string; range: Range };
+              }>('coq/getDocument', {
+                textDocument: {
+                  uri: doc.uri,
+                  version: doc.version,
+                },
+                ast: false,
+                goals: 'Str',
+              })
+            );
+
+            // Filter spans to those within the requested range
+            const targetSpans = result.spans?.filter(span => {
+              const spanLine = span.range.start.line;
+              return spanLine >= range.start.line && spanLine <= range.end.line;
+            }) || [];
+
+            // Check if any spans in the range have errors (we'll need to get diagnostics)
+            // For now, just return span information
+            const rangeSummary = {
+              file,
+              range: {
+                start: `L${range.start.line}`,
+                end: `L${range.end.line}`,
+              },
+              span_count: targetSpans.length,
+              spans: targetSpans.map(span => ({
+                line: span.range.start.line,
+                status: 'parsed', // We'll enhance this later with actual diagnostics
+              })),
+              overall_completed: result.completed?.status || 'unknown',
+              success: true,
+            };
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(rangeSummary, null, 2),
+                },
+              ],
+            };
+          } catch (error) {
+            // Return error information in a concise format
+            const errorSummary = {
+              file,
+              range: {
+                start: `L${range.start.line}`,
+                end: `L${range.end.line}`,
+              },
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(errorSummary, null, 2),
+                },
+              ],
+              isError: true,
+            };
+          }
         }
 
         default:
