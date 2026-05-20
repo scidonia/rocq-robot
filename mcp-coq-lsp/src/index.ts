@@ -582,8 +582,8 @@ async function main() {
       const compact = extra || summary;
       return {
         content: [
-          { type: 'text' as const, text: detail },
           { type: 'text' as const, text: compact },
+          { type: 'text' as const, text: detail },
         ],
       };
     }
