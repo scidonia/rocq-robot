@@ -565,22 +565,17 @@ async function main() {
 
     function reply(summary: string, data: unknown) {
       const d = data as Record<string, unknown>;
-      const detailParts: string[] = [];
+      const parts: string[] = [];
       if (d?.goals) {
         const goalsWrapped = Array.isArray(d.goals) ? { goals: d.goals } : d.goals;
-        detailParts.push(formatGoals(goalsWrapped));
+        parts.push(formatGoals(goalsWrapped));
       }
-      if (Array.isArray(d?.feedback)) detailParts.push(formatFeedback(d.feedback));
-      detailParts.push(formatSemi(data, 0));
-      const detail = detailParts.join('\n');
-      const goalsObj = d?.goals ? (Array.isArray(d.goals) ? { goals: d.goals } : d.goals) : null;
-      const extra = goalsObj ? compactGoalSummary(goalsObj) : '';
-      const compact = extra || summary;
+      if (Array.isArray(d?.feedback) && d.feedback.length > 0) parts.push(formatFeedback(d.feedback));
+      const text = parts.join('\n') || summary;
       return {
         content: [
-          { type: 'text' as const, text: compact },
+          { type: 'text' as const, text },
         ],
-        structuredContent: detail ? { _detail: detail } : undefined,
       };
     }
 
