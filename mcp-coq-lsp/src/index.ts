@@ -1158,11 +1158,19 @@ async function main() {
               : contentLines[lastIdx].length,
           };
           pushFileHistory(file, doc.text);
+
+          // If inserting Qed at a proof-ending keyword line, replace it
+          const docLines = doc.text.split('\n');
+          const curLine = (docLines[position.line] || '').trim();
+          const editEnd: Position = (tactic === 'Qed.' && (curLine === 'Admitted.' || curLine === 'Qed.' || curLine === 'Defined.'))
+            ? { line: position.line, character: (docLines[position.line] || '').length }
+            : position;
+
           const newText = docManager.applyEdits(doc.text, [
             {
               range: {
                 start: position,
-                end: position,
+                end: editEnd,
               },
               newText: insertText,
             },
