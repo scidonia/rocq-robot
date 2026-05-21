@@ -145,6 +145,40 @@ async function main() {
     throw new Error(`No current position set for ${file}. Call coq_focus first to set a position.`);
   }
 
+  function isSkipLine(line: string): boolean {
+    const trimmed = line.trim();
+    return trimmed === '' ||
+      trimmed.startsWith('(*') ||
+      trimmed === 'Proof.' ||
+      trimmed === 'Qed.' ||
+      trimmed === 'Admitted.' ||
+      trimmed === 'Defined.' ||
+      trimmed.startsWith('(*');
+  }
+
+  function autoAdvancePosition(text: string, pos: Position): Position {
+    const lines = text.split('\n');
+    let line = pos.line;
+    for (let i = 0; i < 20; i++) {
+      if (line >= lines.length) break;
+      const l = lines[line];
+      if (!isSkipLine(l)) break;
+      // Skip this line, try next
+      if (l.trim() === 'Proof.' ||
+          l.trim() === 'Defined.') {
+        line = line + 1;
+      } else {
+        line = line + 1;
+      }
+    }
+    if (line >= lines.length) line = lines.length - 1;
+    // Find first non-blank line at or after current
+    while (line < lines.length && lines[line].trim() === '') {
+      line++;
+    }
+    return { line, character: 0 };
+  }
+
   function pushFileHistory(path: string, text: string) {
     if (!fileHistory.has(path)) fileHistory.set(path, []);
     const stack = fileHistory.get(path)!;
@@ -743,6 +777,25 @@ async function main() {
       return `${gl.length} goals`;
     }
 
+    function nextHint(gc: any): string {
+      const goals = gc?.goals || [];
+      const stack = gc?.stack || [];
+      const bullet = gc?.bullet;
+
+      if (goals.length === 0) {
+        if (stack.length === 0) return 'Proof complete. Use coq_insert_tactic "Qed." to close.';
+        return 'No goals at current focus. Use coq_insert_tactic to add the next bullet.';
+      }
+      if (goals.length === 1) {
+        const bg = stack.map(([b, a]: any[]) => b.length + a.length).reduce((s: number, n: number) => s + n, 0);
+        const prefix = bullet ? `bullet ${bullet}` : '';
+        if (bg > 0) return `${prefix ? prefix + ' — ' : ''}1 goal at focus, ${bg} in background. Insert a tactic.`;
+        return '1 goal. Insert a tactic.';
+      }
+      const summary = compactGoalSummary(gc);
+      return `${goals.length} goals at focus. ${summary}${bullet ? ` (bullet ${bullet})` : ''}`;
+    }
+
     function formatFeedback(fb: Array<[number, string]>): string {
       return fb.map(([lvl, msg]) => {
         const tag = lvl === 1 ? 'ERR' : lvl === 3 ? 'WARN' : lvl === 4 ? 'INFO' : 'DBG';
@@ -836,14 +889,15 @@ async function main() {
             position: Position;
           };
 
-          filePositions.set(file, position);
           const doc = await ensureDocumentOpened(file);
+          const advanced = autoAdvancePosition(doc.text, position);
+          filePositions.set(file, advanced);
 
           // Get proof tree
           const goalsResult = await retryDocumentNotReady(() =>
             lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
               textDocument: { uri: doc.uri, version: doc.version },
-              position,
+              position: advanced,
               pp_format: 'Str',
               mode: 'Prev',
             })
@@ -916,6 +970,10 @@ async function main() {
             scriptLines.forEach(l => parts.push(`  ${l}`));
           }
 
+          const hint = nextHint(gc);
+          parts.push('');
+          parts.push(`next: ${hint}`);
+
           return reply(parts.join('\n'), {
             bullet,
             goals_at_focus: goals.length,
@@ -927,6 +985,7 @@ async function main() {
             shelved: shelf.length,
             given_up: givenUp.length,
             script: scriptLines,
+            next: hint,
             error: goalsResult.error || null,
           });
         }
@@ -1033,36 +1092,53 @@ async function main() {
 
         case 'coq_insert_tactic': {
           const rawPos = (args as any).position as Position | undefined;
-          const { file, tactic, follow_with_goals } = args as {
+          const { file, tactic: rawTactic, follow_with_goals } = args as {
             file: string;
             tactic: string;
             follow_with_goals?: boolean;
           };
           const position = (rawPos && rawPos.line !== undefined) ? rawPos : getCurrentPosition(file);
 
+          await ensureDocumentOpened(file);
+          const doc = docManager.getDocument(file)!;
+
+          // Auto-bullet: query proof state to determine if bullet prefix is needed
+          let tactic = rawTactic.trim();
+          try {
+            const stateResult = await retryDocumentNotReady(() =>
+              lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
+                textDocument: { uri: doc.uri, version: doc.version },
+                position,
+                pp_format: 'Str',
+                mode: 'Prev',
+              })
+            );
+            const bullet = stateResult.goals?.bullet;
+            const firstWord = tactic.split(/\s+/)[0];
+            const hasBullet = /^[-+*]+$/.test(firstWord) || firstWord === '{';
+            if (bullet && !hasBullet && tactic !== 'Qed.' && tactic !== 'Defined.' && tactic !== 'Admitted.') {
+              tactic = `${bullet} ${tactic}`;
+            }
+          } catch {
+            // state query is best-effort for bullets
+          }
+
           // Insert tactic at position
-          const insertText = tactic.endsWith('\n') ? tactic : `${tactic}\n`;
+          const insertText = tactic.endsWith('\n') ? `${tactic}\n` : `${tactic}\n`;
           const insertLines = insertText.split('\n');
           const contentLines = insertLines.slice(0, -1); // exclude trailing empty from \n
           const lastIdx = contentLines.length - 1;
           const insertedLinesCount = contentLines.length;
-          // Position at start of the line AFTER all inserted content (for chaining inserts)
           const insertedUntil: Position = {
             line: position.line + insertedLinesCount,
             character: 0,
           };
-          // Position at end of last inserted content line (for coq_try_tactic chaining)
           const nextTacticPosition: Position = {
             line: position.line + lastIdx,
             character: lastIdx === 0
               ? (position.character || 0) + contentLines[0].length
               : contentLines[lastIdx].length,
           };
-
-          await ensureDocumentOpened(file);
-
-          // Apply edit
-          const doc = docManager.getDocument(file)!;
           pushFileHistory(file, doc.text);
           const newText = docManager.applyEdits(doc.text, [
             {
@@ -1102,12 +1178,14 @@ async function main() {
           }
 
           const ngls = goals?.goals?.goals?.length ?? 0;
+          const hint = goals?.goals ? nextHint(goals.goals) : '';
           return reply(
-            `${fileLine(file, position.line)} — inserted "${tactic.trim()}" → ${ngls} goal(s)`,
+            `${fileLine(file, position.line)} — inserted "${tactic.trim()}" → ${ngls} goal(s)${hint ? '\n  next: ' + hint : ''}`,
             {
               applied: true,
               inserted_until: insertedUntil,
               next_tactic_position: nextTacticPosition,
+              next: hint,
               goals: goals?.goals,
               messages: goals?.messages || [],
               error: goals?.error || null,
