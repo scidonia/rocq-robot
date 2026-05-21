@@ -766,7 +766,7 @@ async function main() {
             mode?: string;
           };
 
-          const position = rawPos || getCurrentPosition(file);
+          const position = (rawPos && rawPos.line !== undefined) ? rawPos : getCurrentPosition(file);
 
           // Ensure document is open
           const doc = await ensureDocumentOpened(file);
@@ -1038,7 +1038,7 @@ async function main() {
             tactic: string;
             follow_with_goals?: boolean;
           };
-          const position = rawPos || getCurrentPosition(file);
+          const position = (rawPos && rawPos.line !== undefined) ? rawPos : getCurrentPosition(file);
 
           // Insert tactic at position
           const insertText = tactic.endsWith('\n') ? tactic : `${tactic}\n`;
@@ -1389,7 +1389,7 @@ async function main() {
             tactic: string;
             compact?: boolean;
           };
-          const position = rawPos || getCurrentPosition(file);
+          const position = (rawPos && rawPos.line !== undefined) ? rawPos : getCurrentPosition(file);
 
           const doc = await ensureDocumentOpened(file);
           const uri = doc.uri;
