@@ -180,10 +180,9 @@ async function main() {
     // Skip past all non-blank content (existing tactics)
     for (let i = 0; i < 200; i++) {
       if (line >= lines.length) break;
-      if (lines[line].trim() === '') break;
+      if ((lines[line] || '').trim() === '') break;
       line = line + 1;
     }
-    if (line >= lines.length) line = lines.length - 1;
     return { line, character: 0 };
   }
 
