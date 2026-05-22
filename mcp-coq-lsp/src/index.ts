@@ -1789,25 +1789,23 @@ async function main() {
           const docLines = doc.text.split('\n');
 
           // Walk backwards to find the Lemma/Theorem statement above the cursor
-          let insertLine = docLines.length; // default: append at end
+          let topLine = docLines.length;
           try {
             const cur = getCurrentPosition(file);
             let line = cur.line;
             while (line > 0) {
-              const l = (docLines[line - 1] || '').trim();
-              if (l === '') { line--; continue; }
-              if (isTopLevelLine(docLines[line - 1] || '')) break;
+              const l = (docLines[line] || '').trim();
+              if (isTopLevelLine(docLines[line] || '') || l === 'Proof.') { topLine = line; break; }
               line--;
             }
-            while (line > 0 && (docLines[line - 1] || '').trim() === '') line--;
-            insertLine = line;
+            if (topLine === docLines.length) topLine = 0;
           } catch {
             // no cursor — append at end
           }
 
           const block = `\nLemma ${name} : ${statement}.\nProof.\nAdmitted.\n\n`;
           const newText = docManager.applyEdits(doc.text, [{
-            range: { start: { line: insertLine, character: 0 }, end: { line: insertLine, character: 0 } },
+            range: { start: { line: topLine, character: 0 }, end: { line: topLine, character: 0 } },
             newText: block,
           }]);
 
@@ -1819,11 +1817,10 @@ async function main() {
             const checkResult = await lspClient.sendRequest<{
               diagnostics: Array<{ range: Range; severity: number; message: string }>;
             }>('coq/check', { textDocument: { uri: doc.uri, version: docManager.getDocument(file)!.version } });
-            const diags = (checkResult.diagnostics || []).filter((d: any) => d.range.start.line >= insertLine && d.range.start.line < insertLine + 6 && d.severity === 1);
+            const diags = (checkResult.diagnostics || []).filter((d: any) => d.range.start.line >= topLine && d.range.start.line < topLine + 6 && d.severity === 1);
             if (diags.length > 0) {
-              // Undo and report error
               const old = docManager.applyEdits(newText, [{
-                range: { start: { line: insertLine, character: 0 }, end: { line: insertLine + block.split('\n').length, character: 0 } },
+                range: { start: { line: topLine, character: 0 }, end: { line: topLine + block.split('\n').length, character: 0 } },
                 newText: '',
               }]);
               await docManager.updateDocument(file, old);
@@ -1831,15 +1828,14 @@ async function main() {
               throw new Error(`Lemma type error: ${diags[0].message}`);
             }
           } catch (e: any) {
-            // If it was our undo error, re-throw; otherwise continue
             if (e.message && e.message.startsWith('Lemma type error')) throw e;
           }
 
-          const insPos: Position = { line: insertLine + 3, character: 0 };
+          const insPos: Position = { line: topLine + 3, character: 0 };
           filePositions.set(file, insPos);
 
           return reply(
-            `${fileLine(file, insertLine)} — added Lemma ${name}`,
+            `${fileLine(file, topLine)} — added Lemma ${name}`,
             { applied: true, cursor: insPos }
           );
         }
