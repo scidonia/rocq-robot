@@ -1298,15 +1298,21 @@ async function main() {
                 mode: 'Prev',
               })
             );
-            const rawBullet = stateResult.goals?.bullet || ((stateResult.goals?.goals?.length || 0) > 1 ? '-' : undefined);
+            const bgCount = (stateResult.goals?.stack || []).reduce(
+              (s: number, [b, a]: any[]) => s + (b?.length || 0) + (a?.length || 0), 0
+            );
+            const totalRemaining = (stateResult.goals?.goals?.length || 0) + bgCount;
+            const rawBullet = stateResult.goals?.bullet || (totalRemaining > 1 ? '-' : undefined);
             const bulletMatch = rawBullet?.match(/[-+*]+/);
             const bullet = bulletMatch ? bulletMatch[0] : (rawBullet === '-' || rawBullet === '+' || rawBullet === '*' ? rawBullet : undefined);
             const firstWord = tactic.split(/\s+/)[0];
             const hasBullet = /^[-+*]+$/.test(firstWord) || firstWord === '{';
 
             // Compute indent from stack depth (only for line-start insertions)
+            // When no active bullet, treat nesting level as 0 regardless of stack entries
             const atLineStart = insPos.character === 0;
-            const stackDepth = (stateResult.goals?.stack || []).length;
+            const hasActiveBullet = !!stateResult.goals?.bullet;
+            const stackDepth = hasActiveBullet ? (stateResult.goals?.stack || []).length : 0;
             const indent = atLineStart ? '  '.repeat(stackDepth + 1) : '';
 
             if (bullet && !hasBullet && tactic !== 'Qed.' && tactic !== 'Defined.' && tactic !== 'Admitted.') {
