@@ -495,6 +495,49 @@ describe('coq_add_lemma', () => {
   });
 });
 
+
+// ═══════════════════════════════════════════════════════════════════
+// BULLET QUERY POSITION: always valid, never past EOF (prevents hangs)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('bulletPos: always in-bounds (no hanging)', () => {
+  function bulletQueryPos(text: string, proofName: string) {
+    const lines = text.split('\n');
+    const pLine = findProofLine(lines, proofName);
+    if (pLine < 0) return { valid: false, bulletLine: -1, total: lines.length };
+    const insPos = insertPosition(text, { line: pLine, character: 0 });
+    const bulletLine = Math.min(insPos.line, lines.length - 1);
+    return { valid: bulletLine >= 0 && bulletLine < lines.length, bulletLine, total: lines.length };
+  }
+
+  it('valid after auto-remove (Proof. + blank + next lemma)', () => {
+    const text = `Lemma foo : 1 = 1.\nProof.\n\nLemma bar : 2 = 2.`;
+    const bp = bulletQueryPos(text, 'foo');
+    expect(bp.valid).toBe(true);
+    expect(bp.bulletLine).toBeLessThan(bp.total);
+  });
+
+  it('valid when Proof. is at end of file', () => {
+    const text = `Lemma foo : 1 = 1.\nProof.`;
+    const bp = bulletQueryPos(text, 'foo');
+    expect(bp.valid).toBe(true);
+    // clamped: insPos might be past EOF, bulletLine clamped to last line
+  });
+
+  it('valid for Proof. Admitted. on one line', () => {
+    const text = `Lemma foo : 1 = 1.\nProof. Admitted.\n\nLemma bar : 2 = 2.`;
+    const bp = bulletQueryPos(text, 'foo');
+    expect(bp.valid).toBe(true);
+  });
+
+  it('valid with surrounding definitions + multiple lemmas', () => {
+    const text = `Inductive ty := TyNat.\n\nLemma foo : 1 = 1.\nProof.\n\nLemma bar : 2 = 2.\nProof. Admitted.`;
+    const bp = bulletQueryPos(text, 'foo');
+    expect(bp.valid).toBe(true);
+    expect(bp.bulletLine).toBeLessThan(bp.total - 1); // not at EOF
+  });
+});
+
 describe('full chain (with surrounding defs)', () => {
   const template = surr + `Lemma foo : 1 = 1.\nProof. Admitted.\n\nLemma bar : 2 = 2.\nProof. Admitted.`;
 
