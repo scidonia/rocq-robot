@@ -484,7 +484,8 @@ async function main() {
             'Returns inserted_until (start of next line for chaining inserts) and ' +
             'next_tactic_position (end of last inserted line for coq_try_tactic chaining). ' +
             'Auto-prepends bullet prefix (-, +, *) when proof state requires it. ' +
-            'Position is optional — uses cursor from previous coq_focus or coq_insert_tactic.',
+            'Position is optional — uses cursor from previous coq_focus or coq_insert_tactic. ' +
+            'Prefer explicit "as" clauses with induction/destruct for robust proofs.',
           inputSchema: {
             type: 'object',
             properties: {
