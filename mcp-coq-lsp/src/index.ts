@@ -1002,28 +1002,11 @@ async function main() {
             })
           );
 
-          // Get document spans for proof script
+          // Extract proof script from file content (no LSP query)
           let scriptLines: string[] = [];
-          try {
-            const docInfo = await lspClient.sendRequest<{
-              spans: Array<{ range: Range; ast?: unknown }>;
-            }>('coq/getDocument', {
-              textDocument: { uri: freshDoc.uri, version: freshDoc.version },
-              ast: false,
-            });
-            const fileLines = freshDoc.text.split('\n');
-            // Find the span that contains the current position (the proof statement)
-            for (const span of docInfo.spans || []) {
-              const s = span.range.start;
-              const e = span.range.end;
-              if (s.line <= position.line && position.line <= e.line) {
-                scriptLines = fileLines.slice(s.line, position.line + 1);
-                break;
-              }
-            }
-          } catch {
-            // script extraction is best-effort
-          }
+          const allLines = freshDoc.text.split('\n');
+          const scriptEnd = insertPosition(freshDoc.text, position);
+          scriptLines = allLines.slice(position.line, scriptEnd.line);
 
           const gc = goalsResult.goals;
           const goals = gc?.goals || [];
