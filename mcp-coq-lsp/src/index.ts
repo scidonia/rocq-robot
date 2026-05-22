@@ -149,7 +149,7 @@ async function main() {
     const trimmed = line.trim();
     return trimmed === '' ||
       trimmed.startsWith('(*') ||
-      trimmed === 'Proof.' ||
+      trimmed === 'Proof.' || trimmed.startsWith('Proof. ') ||
       trimmed === 'Defined.';
   }
 
