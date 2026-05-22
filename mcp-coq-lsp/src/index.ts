@@ -1243,7 +1243,7 @@ async function main() {
             const stateResult = await retryDocumentNotReady(() =>
               lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
                 textDocument: { uri: doc.uri, version: doc.version },
-                position,
+                insPos,
                 pp_format: 'Str',
                 mode: 'Prev',
               })
