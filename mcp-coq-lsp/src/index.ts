@@ -1432,6 +1432,13 @@ async function main() {
                   kw === 'Definition' || kw === 'Fixpoint' || kw === 'Inductive' ||
                   kw === 'Example') {
                 const namePart = l.split(':')[0].replace(kw, '').trim();
+                // Extract type/statement (everything after first colon)
+                const colonIdx = l.indexOf(':');
+                let typeStr = '';
+                if (colonIdx >= 0) {
+                  typeStr = l.slice(colonIdx + 1).trim().replace(/\.$/, '');
+                  if (typeStr.length > 80) typeStr = typeStr.slice(0, 77) + '...';
+                }
                 let status = '?';
                 for (let j = i + 1; j < docLines.length; j++) {
                   const t = docLines[j].trim();
@@ -1439,7 +1446,8 @@ async function main() {
                   if (t === 'Admitted.') { status = 'Admitted'; break; }
                   if (isTopLevelLine(docLines[j] || '')) { status = 'open'; break; }
                 }
-                items.push(`${kw} ${namePart}: ${status} (L${i + 1})`);
+                const typePart = typeStr ? ` : ${typeStr}` : '';
+                items.push(`${kw} ${namePart}${typePart}: ${status} (L${i + 1})`);
               }
             }
             const summary = items.length > 0 ? '\n' + items.join('\n') : '';
