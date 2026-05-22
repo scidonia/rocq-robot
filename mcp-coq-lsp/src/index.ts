@@ -1327,9 +1327,18 @@ async function main() {
             const spanCount = result.spans?.length || 0;
             const range = result.completed?.range;
             const loc = range ? `L${range.start.line}-L${range.end.line}` : '?';
+
+            // Count Admitted. occurrences in the file
+            const docLines = doc.text.split('\n');
+            let admittedCount = 0;
+            for (const line of docLines) {
+              if (line.trim() === 'Admitted.') admittedCount++;
+            }
+
             return reply(
-              `${fileLine(file, 0)} — ${result.completed?.status || 'unknown'}, ${spanCount} spans (${loc})`,
-              { file, completed: result.completed?.status, span_count: spanCount, completed_range: loc, success: true }
+              `${fileLine(file, 0)} — ${result.completed?.status || 'unknown'}, ${spanCount} spans (${loc})` +
+                (admittedCount > 0 ? `, ${admittedCount} admitted` : ''),
+              { file, completed: result.completed?.status, span_count: spanCount, completed_range: loc, admitted: admittedCount, success: true }
             );
           } catch (error) {
             return err(
