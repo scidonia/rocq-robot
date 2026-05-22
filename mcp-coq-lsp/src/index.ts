@@ -721,6 +721,21 @@ async function main() {
             required: ['file'],
           },
         },
+        {
+          name: 'coq_add_lemma',
+          description:
+            'Insert a lemma stub (Lemma name : statement. Proof. Admitted.) at the cursor position. ' +
+            'Use this to add helper lemmas above the current proof. Cursor moves to the new proof.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file: { type: 'string', description: 'Path to a .v file' },
+              name: { type: 'string', description: 'Lemma name (e.g. "my_helper")' },
+              statement: { type: 'string', description: 'The lemma statement after the colon' },
+            },
+            required: ['file', 'name', 'statement'],
+          },
+        },
       ],
     };
   });
@@ -1760,6 +1775,72 @@ async function main() {
           return reply(
             `${fileLine(file, proofLine)} — proof reset to Admitted.`,
             { applied: true }
+          );
+        }
+
+        case 'coq_add_lemma': {
+          const { file, name, statement } = args as {
+            file: string;
+            name: string;
+            statement: string;
+          };
+
+          const doc = await ensureDocumentOpened(file);
+          const docLines = doc.text.split('\n');
+
+          // Walk backwards to find the Lemma/Theorem statement above the cursor
+          let insertLine = docLines.length; // default: append at end
+          try {
+            const cur = getCurrentPosition(file);
+            let line = cur.line;
+            while (line > 0) {
+              const l = (docLines[line - 1] || '').trim();
+              if (l === '') { line--; continue; }
+              if (isTopLevelLine(docLines[line - 1] || '')) break;
+              line--;
+            }
+            while (line > 0 && (docLines[line - 1] || '').trim() === '') line--;
+            insertLine = line;
+          } catch {
+            // no cursor — append at end
+          }
+
+          const block = `\nLemma ${name} : ${statement}.\nProof.\nAdmitted.\n\n`;
+          const newText = docManager.applyEdits(doc.text, [{
+            range: { start: { line: insertLine, character: 0 }, end: { line: insertLine, character: 0 } },
+            newText: block,
+          }]);
+
+          await docManager.updateDocument(file, newText);
+          await docManager.saveDocument(file);
+
+          // Lint: check the inserted range for errors
+          try {
+            const checkResult = await lspClient.sendRequest<{
+              diagnostics: Array<{ range: Range; severity: number; message: string }>;
+            }>('coq/check', { textDocument: { uri: doc.uri, version: docManager.getDocument(file)!.version } });
+            const diags = (checkResult.diagnostics || []).filter((d: any) => d.range.start.line >= insertLine && d.range.start.line < insertLine + 6 && d.severity === 1);
+            if (diags.length > 0) {
+              // Undo and report error
+              const old = docManager.applyEdits(newText, [{
+                range: { start: { line: insertLine, character: 0 }, end: { line: insertLine + block.split('\n').length, character: 0 } },
+                newText: '',
+              }]);
+              await docManager.updateDocument(file, old);
+              await docManager.saveDocument(file);
+              throw new Error(`Lemma type error: ${diags[0].message}`);
+            }
+          } catch (e: any) {
+            // If it was our undo error, re-throw; otherwise continue
+            if (e.message && e.message.startsWith('Lemma type error')) throw e;
+          }
+
+          const insPos: Position = { line: insertLine + 3, character: 0 };
+          filePositions.set(file, insPos);
+
+          return reply(
+            `${fileLine(file, insertLine)} — added Lemma ${name}`,
+            { applied: true, cursor: insPos }
           );
         }
 
