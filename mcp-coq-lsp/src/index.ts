@@ -1415,6 +1415,7 @@ async function main() {
                 const t = l.trim();
                 if (t === '' || t === 'Proof.') continue;
                 if (isSkipLine(l)) continue;
+                if (isTopLevelLine(l)) break;
                 scriptLines.push(l);
               }
             }
