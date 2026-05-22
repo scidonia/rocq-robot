@@ -1286,7 +1286,7 @@ async function main() {
             (s: number, [b, a]: any[]) => s + (b?.length || 0) + (a?.length || 0), 0
           );
           const hint = gcAfter ? nextHint(gcAfter) : '';
-          const stateMsg = nFocus === 0 && nBg === 0 ? 'done' :
+          const stateMsg = nFocus === 0 && nBg === 0 ? 'done — try Qed' :
                            nFocus === 0 ? `bullet closed, ${nBg} in background` :
                            nBg > 0 ? `${nFocus} at focus, ${nBg} in background` :
                            `${nFocus} goal(s)`;
