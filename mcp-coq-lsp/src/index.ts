@@ -1785,9 +1785,21 @@ async function main() {
           await docManager.saveDocument(file);
           filePositions.set(file, { line: proofLine + 1, character: 0 });
 
+          // Find the proof name
+          let nameLine = proofLine - 1;
+          let proofName = 'unknown';
+          while (nameLine >= 0) {
+            const nl = (docLines[nameLine] || '').trim();
+            if (isTopLevelLine(docLines[nameLine] || '')) {
+              proofName = nl.split(':')[0].trim();
+              break;
+            }
+            nameLine--;
+          }
+
           return reply(
-            `${fileLine(file, proofLine)} — proof reset to Admitted.`,
-            { applied: true }
+            `${fileLine(file, proofLine)} — reset "${proofName}" to Admitted.`,
+            { applied: true, proof: proofName }
           );
         }
 
