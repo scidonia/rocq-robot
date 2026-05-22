@@ -170,6 +170,23 @@ async function main() {
     return t === 'Qed.' || t === 'Admitted.' || t === 'Defined.';
   }
 
+  function findProofLine(lines: string[], searchName: string): number {
+    const s = searchName.trim();
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i].trim();
+      const kw = l.split(/\s+/)[0];
+      if ((kw === 'Lemma' || kw === 'Theorem' || kw === 'Corollary' || kw === 'Example') &&
+          l.includes(s + ' :')) {
+        for (let j = i + 1; j < lines.length; j++) {
+          const t = (lines[j] || '').trim();
+          if (t === 'Proof.' || t.startsWith('Proof. ')) return j;
+          if (isTopLevelLine(lines[j] || '') || isProofEndLine(lines[j] || '')) break;
+        }
+      }
+    }
+    return -1;
+  }
+
   function isTopLevelLine(line: string): boolean {
     const t = line.trim();
     const kw = t.split(/\s+/)[0];
@@ -679,60 +696,48 @@ async function main() {
             'and the proof script up to the given position. ' +
             'Sets the file cursor — subsequent coq_insert_tactic/coq_try_tactic calls ' +
             'use this cursor automatically. Auto-removes empty Admitted stubs. ' +
-            'Uses Prev mode to show goals even when Admitted follows Proof.',
+            'Accepts proof name (e.g. "has_type_weaken") or explicit position.',
           inputSchema: {
             type: 'object',
             properties: {
-              file: {
-                type: 'string',
-                description: 'Path to a .v file',
-              },
+              file: { type: 'string', description: 'Path to a .v file' },
               position: {
                 type: 'object',
-                properties: {
-                  line: { type: 'number' },
-                  character: { type: 'number' },
-                },
+                properties: { line: { type: 'number' }, character: { type: 'number' } },
                 required: ['line', 'character'],
-                description: 'Position in the file (0-based)',
               },
+              name: { type: 'string', description: 'Proof name (alternative to position)' },
             },
-            required: ['file', 'position'],
+            required: ['file'],
           },
         },
         {
           name: 'coq_reset_proof',
           description:
             'Wipe the proof body (from Proof. to Qed./Admitted.) and replace with fresh Admitted. ' +
-            'Use this to start over on a broken proof. Position defaults to current cursor.',
+            'Use this to start over on a broken proof.',
           inputSchema: {
             type: 'object',
             properties: {
               file: { type: 'string', description: 'Path to a .v file' },
-              position: {
-                type: 'object',
-                properties: {
-                  line: { type: 'number' },
-                  character: { type: 'number' },
-                },
-                required: ['line', 'character'],
-                description: 'Position near the Proof. line (optional, uses cursor)',
-              },
+              name: { type: 'string', description: 'Proof name (e.g. "has_type_weaken")' },
             },
-            required: ['file'],
+            required: ['file', 'name'],
           },
         },
         {
           name: 'coq_add_lemma',
           description:
-            'Insert a lemma stub (Lemma name : statement. Proof. Admitted.) at the cursor position. ' +
-            'Use this to add helper lemmas above the current proof. Cursor moves to the new proof.',
+            'Insert a lemma stub (Lemma name : statement. Proof. Admitted.) ' +
+            'above a specified proof. Use "before" to name which proof it goes above. ' +
+            'Cursor moves to the new proof.',
           inputSchema: {
             type: 'object',
             properties: {
               file: { type: 'string', description: 'Path to a .v file' },
               name: { type: 'string', description: 'Lemma name (e.g. "my_helper")' },
               statement: { type: 'string', description: 'The lemma statement after the colon' },
+              before: { type: 'string', description: 'Proof name to insert above (e.g. "preservation")' },
             },
             required: ['file', 'name', 'statement'],
           },
@@ -959,13 +964,26 @@ async function main() {
         }
 
         case 'coq_focus': {
-          const { file, position } = args as {
+          const { file, position: rawPos, name } = args as {
             file: string;
-            position: Position;
+            position?: Position;
+            name?: string;
           };
 
           const doc = await ensureDocumentOpened(file);
           const docLines = doc.text.split('\n');
+
+          // Resolve position: by name or explicit
+          let position: Position;
+          if (name) {
+            const pLine = findProofLine(docLines, name);
+            if (pLine < 0) throw new Error(`Proof not found: "${name}"`);
+            position = { line: pLine, character: 0 };
+          } else if (rawPos && rawPos.line !== undefined) {
+            position = rawPos;
+          } else {
+            position = getCurrentPosition(file);
+          }
 
           // Auto-remove Admitted if proof body is empty (no tactics between Proof and Admitted)
           const insPos = insertPosition(doc.text, position);
@@ -1341,8 +1359,29 @@ async function main() {
               ? `, ${admittedCount} admitted (lines ${admittedAt.map(l => l + 1).join(', ')})`
               : '';
 
+            // Summary: scan file for toplevel names and their status
+            const items: string[] = [];
+            for (let i = 0; i < docLines.length; i++) {
+              const l = docLines[i].trim();
+              const kw = l.split(/\s+/)[0];
+              if (kw === 'Lemma' || kw === 'Theorem' || kw === 'Corollary' ||
+                  kw === 'Definition' || kw === 'Fixpoint' || kw === 'Inductive' ||
+                  kw === 'Example') {
+                const namePart = l.split(':')[0].replace(kw, '').trim();
+                let status = '?';
+                for (let j = i + 1; j < docLines.length; j++) {
+                  const t = docLines[j].trim();
+                  if (t === 'Qed.') { status = 'Qed'; break; }
+                  if (t === 'Admitted.') { status = 'Admitted'; break; }
+                  if (isTopLevelLine(docLines[j] || '')) { status = 'open'; break; }
+                }
+                items.push(`${kw} ${namePart}: ${status} (L${i + 1})`);
+              }
+            }
+            const summary = items.length > 0 ? '\n' + items.join('\n') : '';
+
             return reply(
-              `${fileLine(file, 0)} — ${result.completed?.status || 'unknown'}, ${spanCount} spans (${loc})` + admittedInfo,
+              `${fileLine(file, 0)} — ${result.completed?.status || 'unknown'}, ${spanCount} spans (${loc})` + admittedInfo + summary,
               { file, completed: result.completed?.status, span_count: spanCount, completed_range: loc, admitted: admittedCount, admitted_lines: admittedAt, success: true }
             );
           } catch (error) {
@@ -1751,20 +1790,15 @@ async function main() {
         }
 
         case 'coq_reset_proof': {
-          const rawPos = (args as any).position as Position | undefined;
-          const { file } = args as { file: string };
-          const pos = (rawPos && rawPos.line !== undefined) ? rawPos : getCurrentPosition(file);
+          const { file, name } = args as {
+            file: string;
+            name: string;
+          };
 
           const doc = await ensureDocumentOpened(file);
           const docLines = doc.text.split('\n');
-
-          let proofLine = pos.line;
-          while (proofLine >= 0) {
-            const l = (docLines[proofLine] || '').trim();
-            if (l === 'Proof.' || l.startsWith('Proof. ')) break;
-            proofLine--;
-          }
-          if (proofLine < 0) throw new Error('No Proof. found before position');
+          const proofLine = findProofLine(docLines, name);
+          if (proofLine < 0) throw new Error(`Proof not found: "${name}"`);
 
           let endLine = proofLine + 1;
           while (endLine < docLines.length) {
@@ -1805,33 +1839,50 @@ async function main() {
         }
 
         case 'coq_add_lemma': {
-          const { file, name, statement } = args as {
+          const { file, name, statement, before } = args as {
             file: string;
             name: string;
             statement: string;
+            before?: string;
           };
 
           const doc = await ensureDocumentOpened(file);
           const docLines = doc.text.split('\n');
           let targetLine: number;
 
-          // Find the toplevel statement we're inside, walking backwards from cursor
-          try {
-            const cur = getCurrentPosition(file);
-            targetLine = 0;
-            for (let i = cur.line; i >= 0; i--) {
-              const l = (docLines[i] || '').trim();
-              const kw = l.split(/\s+/)[0];
+          if (before) {
+            const pLine = findProofLine(docLines, before);
+            if (pLine < 0) throw new Error(`"${before}" not found`);
+            // Find the toplevel statement line above this Proof.
+            for (let i = pLine - 1; i >= 0; i--) {
+              const kw = (docLines[i] || '').trim().split(/\s+/)[0];
               if (kw === 'Lemma' || kw === 'Theorem' || kw === 'Corollary' ||
                   kw === 'Definition' || kw === 'Fixpoint' || kw === 'Inductive' ||
-                  kw === 'Example' || kw === 'Remark' || kw === 'Fact' ||
-                  kw === 'Axiom' || kw === 'CoInductive') {
+                  kw === 'Example' || kw === 'Axiom') {
                 targetLine = i;
                 break;
               }
             }
-          } catch {
-            targetLine = docLines.length;
+            targetLine = targetLine!;
+          } else {
+            // Use cursor-based search
+            try {
+              const cur = getCurrentPosition(file);
+              targetLine = 0;
+              for (let i = cur.line; i >= 0; i--) {
+                const l = (docLines[i] || '').trim();
+                const kw = l.split(/\s+/)[0];
+                if (kw === 'Lemma' || kw === 'Theorem' || kw === 'Corollary' ||
+                    kw === 'Definition' || kw === 'Fixpoint' || kw === 'Inductive' ||
+                    kw === 'Example' || kw === 'Remark' || kw === 'Fact' ||
+                    kw === 'Axiom' || kw === 'CoInductive') {
+                  targetLine = i;
+                  break;
+                }
+              }
+            } catch {
+              targetLine = docLines.length;
+            }
           }
 
           const block = `\nLemma ${name} : ${statement}.\nProof.\nAdmitted.\n\n`;
