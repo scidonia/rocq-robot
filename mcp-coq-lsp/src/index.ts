@@ -259,20 +259,29 @@ async function main() {
       speculativeImports.clear();
       fileHistory.clear();
 
-      // Do NOT await the full restart — fire it and let the caller retry.
-      // The MCP client has a tighter timeout than the LSP cold-start needs.
-      lspClient.restart({
-        workspaceRoot: projectRoot,
-        rocqLspArgs: computeRocqLspArgs(projectRoot),
-      }).then(() => {
+      // Await the restart, then retry — no need for the caller to retry manually.
+      try {
+        await lspClient.restart({
+          workspaceRoot: projectRoot,
+          rocqLspArgs: computeRocqLspArgs(projectRoot),
+        });
         console.error('[mcp-coq-lsp] Workspace switch complete');
-      }).catch(err => {
+      } catch (err) {
         console.error('[mcp-coq-lsp] Workspace switch failed:', err);
-      });
+        throw new Error('Workspace switch failed for ' + projectRoot);
+      }
 
-      const e = new Error('Switching workspace to ' + projectRoot + ' — please retry');
-      (e as any).retryAfter = 5000;
-      throw e;
+      // Retry document open with the new workspace
+      try {
+        return await docManager.openDocument(path);
+      } catch (err: any) {
+        if (err?.message?.includes('not ready') || err?.message?.includes('not started')) {
+          // Give the LSP a moment to finish initializing
+          await sleep(500);
+          return await docManager.openDocument(path);
+        }
+        throw err;
+      }
     }
 
     try {
