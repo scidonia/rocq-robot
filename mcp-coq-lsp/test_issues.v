@@ -136,6 +136,5 @@ Theorem preservation : forall t mu t' mu' T S,
   heap_ok mu S ->
   exists S', extends S' S /\ heap_ok mu' S' /\ has_type [] S' t' T.
 Proof.
-
-intros t mu t' mu' T S Hty Hstep Hok.
+  intros t mu t' mu' T S Hty Hstep Hok.
 Admitted.

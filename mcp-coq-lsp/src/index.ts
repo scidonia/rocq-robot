@@ -953,65 +953,20 @@ async function main() {
           if (pLine < 0) throw new Error(`Proof not found: "${name}"`);
           const position = { line: pLine, character: 0 };
 
-          // Auto-remove Admitted if proof body is empty (no tactics between Proof and Admitted)
-          let didAutoRemove = false;
-          const insPos = insertPosition(doc.text, position);
-          const insLine = (docLines[insPos.line] || '').trim();
-          // Case 1: "Admitted." on its own line
-          if ((insLine === 'Admitted.' || insLine === 'Qed.' || insLine === 'Defined.')) {
-            let prev = insPos.line - 1;
-            while (prev >= 0 && (docLines[prev].trim() === '' || docLines[prev].trim().startsWith('(*'))) prev--;
-            if (prev >= 0 && ((docLines[prev] || '').trim() === 'Proof.')) {
-              const cleared = docManager.applyEdits(doc.text, [{
-                range: { start: { line: insPos.line, character: 0 }, end: { line: insPos.line + 1, character: 0 } },
-                newText: '',
-              }]);
-              await docManager.updateDocument(file, cleared);
-              await docManager.saveDocument(file);
-              didAutoRemove = true;
-            }
-          }
-          // Case 2: "Proof. Admitted." on one line (after insertPosition advanced past it)
-          if (!didAutoRemove) {
-            for (let i = insPos.line - 1; i >= 0; i--) {
-              const t = (docLines[i] || '').trim();
-              if (t.startsWith('Proof.') && t !== 'Proof.' &&
-                  (t.includes('Admitted.') || t.includes('Qed.') || t.includes('Defined.'))) {
-                const cleared = docManager.applyEdits(doc.text, [{
-                  range: { start: { line: i, character: 0 }, end: { line: i + 1, character: 0 } },
-                  newText: 'Proof.\n',
-                }]);
-                await docManager.updateDocument(file, cleared);
-                await docManager.saveDocument(file);
-                didAutoRemove = true;
-                break;
-              }
-              if (t !== '' && !t.startsWith('(*')) break;
-            }
-          }
-          // Refresh document state after any auto-remove edit
-          const freshDoc = didAutoRemove ? docManager.getDocument(file)! : doc;
-
-          // Force LSP to finish parsing, then query goals at last point
-          await retryDocumentNotReady(() =>
-            lspClient.sendRequest('coq/check', {
-              textDocument: { uri: doc.uri, version: doc.version },
-            })
-          );
           const lastPoint = insertPosition(doc.text, position);
           const goalsResult = await retryDocumentNotReady(() =>
             lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
               textDocument: { uri: doc.uri, version: doc.version },
-              lastPoint,
+              position: lastPoint,
               pp_format: 'Str',
-              mode: 'After',
+              mode: 'Prev',
             })
           );
 
           // Extract proof script from file content (no LSP query)
           let scriptLines: string[] = [];
-          const allLines = freshDoc.text.split('\n');
-          const scriptEnd = insertPosition(freshDoc.text, position);
+          const allLines = doc.text.split('\n');
+          const scriptEnd = insertPosition(doc.text, position);
           scriptLines = allLines.slice(position.line, scriptEnd.line);
 
           const gc = goalsResult.goals;
@@ -1023,7 +978,7 @@ async function main() {
 
           // Format proof tree as text
           const parts: string[] = [];
-          parts.push(`${fileLine(file, position.line)}${didAutoRemove ? ' (auto-removed empty proof)' : ''}`);
+          parts.push(`${fileLine(file, position.line)}`);
 
           // Bullet level
           if (bullet) parts.push(`  bullet: ${bullet}`);
@@ -1073,7 +1028,7 @@ async function main() {
             shelved: shelf.length,
             given_up: givenUp.length,
             script: scriptLines,
-            auto_removed: didAutoRemove,
+            auto_removed: false,
             next: hint,
             error: goalsResult.error || null,
           });
@@ -1230,7 +1185,19 @@ async function main() {
           const position = { line: proofLine, character: 0 };
 
           // Advance past Proof. and blank lines to the actual insert point
-          const insPos = insertPosition(doc.text, position);
+          let insPos = insertPosition(doc.text, position);
+
+          // Handle "Proof. Admitted." on one line: split so tactic goes between them
+          // and Admitted. is preserved at the end
+          let oneLineSplit = false;
+          if (insPos.line > 0) {
+            const prev = (docLines[insPos.line - 1] || '').trim();
+            if (prev.startsWith('Proof.') && prev !== 'Proof.' &&
+                (prev.includes('Admitted.') || prev.includes('Qed.') || prev.includes('Defined.'))) {
+              oneLineSplit = true;
+              insPos = { line: insPos.line - 1, character: 0 };
+            }
+          }
 
           // Auto-bullet: query proof state to determine if bullet prefix is needed
           let tactic = rawTactic.trim();
@@ -1238,7 +1205,7 @@ async function main() {
             const stateResult = await retryDocumentNotReady(() =>
               lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
                 textDocument: { uri: doc.uri, version: doc.version },
-                insPos,
+                position: insPos,
                 pp_format: 'Str',
                 mode: 'Prev',
               })
@@ -1270,7 +1237,18 @@ async function main() {
           }
 
           // Insert tactic at insert point
-          const insertText = tactic.endsWith('\n') ? `${tactic}\n` : `${tactic}\n`;
+          let insertText: string;
+          let editEnd: Position;
+          if (oneLineSplit) {
+            insertText = `Proof.\n${tactic}\nAdmitted.\n`;
+            editEnd = { line: insPos.line + 1, character: 0 };
+          } else {
+            insertText = tactic.endsWith('\n') ? `${tactic}\n` : `${tactic}\n`;
+            const curLine = (docLines[insPos.line] || '').trim();
+            editEnd = (tactic === 'Qed.' && (curLine === 'Admitted.' || curLine === 'Qed.' || curLine === 'Defined.'))
+              ? { line: insPos.line, character: (docLines[insPos.line] || '').length }
+              : insPos;
+          }
           const insertLines = insertText.split('\n');
           const contentLines = insertLines.slice(0, -1); // exclude trailing empty from \n
           const lastIdx = contentLines.length - 1;
@@ -1286,12 +1264,8 @@ async function main() {
               : contentLines[lastIdx].length,
           };
           pushFileHistory(file, doc.text);
-
-          // If inserting Qed at a proof-ending keyword line, replace it
-          const curLine = (docLines[insPos.line] || '').trim();
-          const editEnd: Position = (tactic === 'Qed.' && (curLine === 'Admitted.' || curLine === 'Qed.' || curLine === 'Defined.'))
-            ? { line: insPos.line, character: (docLines[insPos.line] || '').length }
-            : insPos;
+          const preEditVersion = doc.version;
+          const preEditText = doc.text;
 
           const newText = docManager.applyEdits(doc.text, [
             {
@@ -1308,20 +1282,20 @@ async function main() {
 
           let goals = null;
           if (follow_with_goals ?? true) {
-            const updatedDoc = docManager.getDocument(file)!;
             try {
+              const updatedDoc = docManager.getDocument(file)!;
               const goalsQueryPos = safePos(insertedUntil, updatedDoc.text);
-              const goalsResult = await lspClient.sendRequest<
-                GoalAnswer<string>
-              >('proof/goals', {
-                textDocument: {
-                  uri: updatedDoc.uri,
-                  version: updatedDoc.version,
-                },
-                position: goalsQueryPos,
-                pp_format: 'Str',
-                mode: 'Prev',
-              });
+              const goalsResult = await retryDocumentNotReady(() =>
+                lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
+                  textDocument: {
+                    uri: updatedDoc.uri,
+                    version: updatedDoc.version,
+                  },
+                  position: goalsQueryPos,
+                  pp_format: 'Str',
+                  mode: oneLineSplit ? 'Prev' : 'Prev',
+                })
+              );
               if (goalsResult.error) {
                 console.error('Goals query error:', goalsResult.error);
               }
@@ -1332,14 +1306,24 @@ async function main() {
           }
 
           const gcAfter = goals?.goals;
-          const queryError = goals?.error;
+          const msgs = (goals as any)?.messages || [];
+          const coqErrors: string[] = [];
+          for (const m of msgs) {
+            if (m.level >= 1 && typeof m.pp === 'string' && m.pp.trim()) {
+              coqErrors.push(m.pp.trim());
+            }
+          }
+
+          const queryError = goals?.error || (coqErrors.length > 0 ? coqErrors.join('; ') : undefined);
           const nFocus = gcAfter?.goals?.length ?? 0;
           const nBg = (gcAfter?.stack || []).reduce(
             (s: number, [b, a]: any[]) => s + (b?.length || 0) + (a?.length || 0), 0
           );
           const hint = gcAfter ? nextHint(gcAfter) : '';
+
           const stateMsg = queryError
             ? `error: ${queryError}`
+            : oneLineSplit ? 'inserted'
             : gcAfter === undefined || gcAfter === null
             ? 'goals query failed'
             : nFocus === 0 && nBg === 0 ? 'done — try Qed'
