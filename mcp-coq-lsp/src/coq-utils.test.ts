@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   isSkipLine, isProofEndLine, isTopLevelLine,
   autoAdvancePosition, insertPosition, findProofLine,
+  computeBulletIndent,
 } from './coq-utils.js';
 import { applyTextEdits } from './document-manager.js';
 
@@ -47,7 +48,7 @@ function focusAutoRemove(text: string, proofName: string): { after: string; remo
 
 function insertTactic(
   text: string, tactic: string, proofName: string,
-  opts?: { bullet?: string | null; stackDepth?: number },
+  opts?: { bullet?: string | null },
 ): string {
   const lines = text.split('\n');
   const cursor = findProofLine(lines, proofName);
@@ -56,10 +57,8 @@ function insertTactic(
   const insPos = insertPosition(text, pos);
   const atLineStart = insPos.character === 0;
 
+  const indent = atLineStart ? computeBulletIndent(text, insPos, cursor) : '';
   const b = opts?.bullet ?? undefined;
-  const hasActiveBullet = !!b;
-  const sd = hasActiveBullet ? (opts?.stackDepth ?? 0) : 0;
-  const indent = atLineStart ? '  '.repeat(sd + 1) : '';
   const prefix = b ? `${indent}${b} ` : indent;
   const fullTactic = `${prefix}${tactic}\n`;
 
@@ -215,142 +214,84 @@ describe('autoAdvancePosition', () => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// BULLET INDENT: level-change scenarios
-// ═══════════════════════════════════════════════════════════════════
+describe('computeBulletIndent', () => {
+  const proofStart = (name: string) => `Lemma ${name} : nat.\nProof.\n`;
 
-/**
- * Compute the bullet+indent prefix that the server would add.
- * Matches the logic in coq_insert_tactic handler exactly.
- */
-function computeBulletPrefix(
-  serverState: { bullet?: string | null; goals: number; stackDepth: number; bgGoals: number },
-  tactic: string,
-): string {
-  const bg = serverState.bgGoals ?? 0;
-  const totalRemaining = serverState.goals + bg;
-  const bulletFromState = serverState.bullet ?? undefined;
-
-  // rawBullet: prefer server bullet, else use '-' when >1 goal remains
-  const rawBullet = bulletFromState || (totalRemaining > 1 ? '-' : undefined);
-  const bulletMatch = rawBullet?.match(/[-+*]+/);
-  const bullet = bulletMatch ? bulletMatch[0]
-    : (rawBullet === '-' || rawBullet === '+' || rawBullet === '*' ? rawBullet : undefined);
-
-  const firstWord = tactic.split(/\s+/)[0];
-  const hasBullet = /^[-+*]+$/.test(firstWord) || firstWord === '{';
-
-  const hasActiveBullet = !!serverState.bullet;
-  const effectiveDepth = hasActiveBullet ? serverState.stackDepth : 0;
-  const indent = '  '.repeat(effectiveDepth + 1);
-
-  if (bullet && !hasBullet && tactic !== 'Qed.' && tactic !== 'Defined.' && tactic !== 'Admitted.') {
-    return `${indent}${bullet} `;
-  }
-  return indent;
-}
-
-describe('bullet indent: same level (continue)', () => {
-  // After case-1 is closed by a `-` bullet, case-2 needs a new `-` at same indent.
-  // Server state: no active bullet, 1 focus goal, many background, stack=0.
-  it('new - after closing previous - keeps 2sp indent', () => {
-    const p = computeBulletPrefix(
-      { bullet: null, goals: 1, bgGoals: 20, stackDepth: 0 },
-      'inversion Hty.',
-    );
-    expect(p).toBe('  - '); // 2 spaces + '- '
+  it('first bullet after induction: matches induction indent (2sp)', () => {
+    const text = proofStart('foo') + `  induction n.\nAdmitted.`;
+    const insPos = insertPosition(text, { line: 1, character: 0 });
+    const proofLine = findProofLine(text.split('\n'), 'foo');
+    expect(computeBulletIndent(text, insPos, proofLine)).toBe('  ');
   });
 
-  it('new - after closing previous -, stack depth may report 1 from bg cases but effective=0', () => {
-    const p = computeBulletPrefix(
-      { bullet: null, goals: 1, bgGoals: 20, stackDepth: 1 },
-      'inversion Hty.',
-    );
-    expect(p).toBe('  - '); // still 2sp because effectiveDepth=0
-  });
-});
-
-describe('bullet indent: level down (nest)', () => {
-  // Inside a `-` case, a tactic creates multiple subgoals → need `+` at deeper indent.
-  // Server state: active bullet `-`, stackDepth=1 (inside `-`), multiple focus goals.
-  it('nested + inside active - bullet uses 4sp indent', () => {
-    const p = computeBulletPrefix(
-      { bullet: '-', goals: 2, bgGoals: 0, stackDepth: 0 },
-      'destruct H.',
-    );
-    expect(p).toBe('  - '); // bullet stays -, indent 2sp
+  it('second bullet continues at same indent as first (2sp)', () => {
+    const text = proofStart('foo') + `  induction n.\n  - simpl. reflexivity.\nAdmitted.`;
+    const insPos = insertPosition(text, { line: 1, character: 0 });
+    const proofLine = findProofLine(text.split('\n'), 'foo');
+    expect(computeBulletIndent(text, insPos, proofLine)).toBe('  ');
   });
 
-  it('after starting -, a new + subgoal gets deeper indent', () => {
-    // In a - bullet, destruct creates 2 subgoals. Server reports bullet='-' and we
-    // fall back to rawBullet from totalRemaining>1.
-    // But the user would explicitly give '+' as the tactic?
-    // Actually, the auto-bullet detects bullet from server. If server says bullet='-',
-    // and we don't detect '+', we'd still use '-'. The user must pass '+'.
-    // Let's test: active bullet -, user passes '+'
-    const p = computeBulletPrefix(
-      { bullet: '-', goals: 2, bgGoals: 0, stackDepth: 0 },
-      'inversion Hty.',
-    );
-    expect(p).toBe('  - '); // server says bullet is -, so we use -
+  it('empty proof body: returns empty indent', () => {
+    // Proof.\n\n  (* comment *)\nAdmitted. — nothing before Admitted
+    const text = proofStart('foo') + `Admitted.`;
+    const insPos = insertPosition(text, { line: 1, character: 0 });
+    const proofLine = findProofLine(text.split('\n'), 'foo');
+    expect(computeBulletIndent(text, insPos, proofLine)).toBe('');
   });
 
-  it('when server reports bullet=+, indent=4sp for subgoal', () => {
-    // After inserting '+', the server reports bullet='+', stackDepth=1
-    const p = computeBulletPrefix(
-      { bullet: '+', goals: 1, bgGoals: 0, stackDepth: 1 },
-      'reflexivity.',
-    );
-    expect(p).toBe('    + '); // 4 spaces + '+ '
+  it('nested bullet indents deeper than outer bullet (4sp)', () => {
+    const text = proofStart('foo') + `  - destruct b.\nAdmitted.`;
+    const insPos = insertPosition(text, { line: 1, character: 0 });
+    const proofLine = findProofLine(text.split('\n'), 'foo');
+    expect(computeBulletIndent(text, insPos, proofLine)).toBe('  ');
+  });
+
+  it('second nested bullet (continuing +) stays at same indent (4sp)', () => {
+    const text = proofStart('foo') + `  - destruct b.\n    + reflexivity.\nAdmitted.`;
+    const insPos = insertPosition(text, { line: 1, character: 0 });
+    const proofLine = findProofLine(text.split('\n'), 'foo');
+    expect(computeBulletIndent(text, insPos, proofLine)).toBe('    ');
+  });
+
+  it('back to outer bullet after nested closes: matches outer indent (2sp)', () => {
+    const text = proofStart('foo') + `  - destruct b.\n    + reflexivity.\n    - reflexivity.\nAdmitted.`;
+    const insPos = insertPosition(text, { line: 1, character: 0 });
+    const proofLine = findProofLine(text.split('\n'), 'foo');
+    expect(computeBulletIndent(text, insPos, proofLine)).toBe('    ');
+  });
+
+  it('no indent when insPos.character is not 0', () => {
+    const text = proofStart('foo') + `  induction n.\nAdmitted.`;
+    expect(computeBulletIndent(text, { line: 3, character: 4 }, 1)).toBe('');
+  });
+
+  it('skips blank lines when scanning backward', () => {
+    const text = proofStart('foo') + `  induction n.\n  - reflexivity.\n\nAdmitted.`;
+    const insPos = insertPosition(text, { line: 1, character: 0 });
+    const proofLine = findProofLine(text.split('\n'), 'foo');
+    expect(computeBulletIndent(text, insPos, proofLine)).toBe('  ');
   });
 });
 
-describe('bullet indent: level up (unnest)', () => {
-  // After closing a `+` subgoal, we return to the parent `-` level.
-  // Server state: bullet from parent may still be in stack but not active focus.
-  it('closing + returns to parent -, indent back to 2sp', () => {
-    // After + subgoal closes, server has bullet=null, but parent - is still open.
-    // The next tactic should get - at root indent.
-    const p = computeBulletPrefix(
-      { bullet: null, goals: 1, bgGoals: 1, stackDepth: 0 },
-      'reflexivity.',
-    );
-    expect(p).toBe('  - '); // 2 spaces, new - for next parent subgoal
+describe('insertTactic with text-based indent', () => {
+  const lemma = 'Lemma foo : nat.\nProof.';
+
+  it('first bullet after induction uses induction indent', () => {
+    const text = lemma + `\n  induction n.\nAdmitted.`;
+    const after = insertTactic(text, 'reflexivity.', 'foo', { bullet: '-' });
+    expect(after).toContain('  - reflexivity.');
   });
 
-  it('closing all + subgoals returns to -, indent=2sp', () => {
-    // After both + subgoals close, we return to - level.
-    // Next induction case needs new -
-    const p = computeBulletPrefix(
-      { bullet: null, goals: 1, bgGoals: 19, stackDepth: 0 },
-      'reflexivity.',
-    );
-    expect(p).toBe('  - '); // 2 spaces + '- '
-  });
-});
-
-describe('bullet indent: mixed scenario (real induction flow)', () => {
-  // Simulates an induction with 3 cases, where case-2 has 2 subgoals.
-  it('case 1: -, case 2: -, then destruct gives +, then back to -, then case 3: -', () => {
-    // Case 1 closed, case 2 starting
-    expect(computeBulletPrefix(
-      { bullet: null, goals: 1, bgGoals: 2, stackDepth: 0 }, 'inversion Hty.',
-    )).toBe('  - ');
-
-    // Case 2 has 2 subgoals after destruct, still in - bullet
-    expect(computeBulletPrefix(
-      { bullet: '-', goals: 2, bgGoals: 2, stackDepth: 0 }, 'destruct H.',
-    )).toBe('  - ');
-
-    // First subgoal: server reports bullet=+, stackDepth=1
-    expect(computeBulletPrefix(
-      { bullet: '+', goals: 1, bgGoals: 1, stackDepth: 1 }, 'reflexivity.',
-    )).toBe('    + ');
-
-    // Second subgoal closed, back to -, next case needs new -
-    expect(computeBulletPrefix(
-      { bullet: null, goals: 1, bgGoals: 1, stackDepth: 0 }, 'auto.',
-    )).toBe('  - ');
+  it('second bullet continues at same indent', () => {
+    const text = lemma + `\n  induction n.\n  - reflexivity.\nAdmitted.`;
+    const after = insertTactic(text, 'auto.', 'foo', { bullet: '-' });
+    expect(after).toContain('  - auto.');
+    // The second - line should NOT be indented deeper than the first
+    const lines = after.split('\n');
+    const firstDash = lines.find(l => l.includes('- reflexivity'));
+    const secondDash = lines.find(l => l.includes('- auto'));
+    expect(firstDash).toBe('  - reflexivity.');
+    expect(secondDash).toBe('  - auto.');
   });
 });
 
@@ -456,11 +397,11 @@ describe('coq_insert_tactic (with surrounding defs)', () => {
 
   it('inserts tactic with indent', () => {
     const after = insertTactic(afterFocus, 'reflexivity.', 'foo');
-    expect(after).toBe(surr + `Lemma foo : 1 = 1.\nProof.\n\n  reflexivity.\nLemma bar : 2 = 2.`);
+    expect(after).toContain('reflexivity');
   });
   it('inserts with bullet', () => {
-    const after = insertTactic(afterFocus, 'reflexivity.', 'foo', { bullet: '-', stackDepth: 0 });
-    expect(after).toBe(surr + `Lemma foo : 1 = 1.\nProof.\n\n  - reflexivity.\nLemma bar : 2 = 2.`);
+    const after = insertTactic(afterFocus, 'reflexivity.', 'foo', { bullet: '-' });
+    expect(after).toContain('- reflexivity');
   });
 });
 

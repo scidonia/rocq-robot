@@ -14,6 +14,7 @@ import {
 import { RocqLspClient } from './lsp-client.js';
 import { DocumentManager } from './document-manager.js';
 import { detectProjectConfig, mergeProjectArgs, findProjectRoot } from './project-config.js';
+import { isSkipLine, isProofEndLine, isTopLevelLine, autoAdvancePosition, insertPosition, findProofLine, computeBulletIndent } from './coq-utils.js';
 import type {
   Position,
   Range,
@@ -143,89 +144,6 @@ async function main() {
   const MAX_HISTORY = 50;
   // Track the last insertion per file — used by coq_insert_tactic replace:true
   const lastInsertion = new Map<string, { range: Range }>();
-
-  function isSkipLine(line: string): boolean {
-    const trimmed = line.trim();
-    if (trimmed === '') return true;
-    if (trimmed.startsWith('(*')) return true;
-    if (trimmed === 'Proof.' || trimmed.startsWith('Proof. ')) {
-      const after = trimmed.substring('Proof.'.length).trim();
-      // Don't skip "Proof. Admitted." — that's the entire proof body
-      if (after === 'Admitted.' || after === 'Qed.' || after === 'Defined.') return false;
-      return true;
-    }
-    return false;
-  }
-
-  function autoAdvancePosition(text: string, pos: Position): Position {
-    const lines = text.split('\n');
-    let line = pos.line;
-    // Phase 1: skip keyword/comment lines
-    for (let i = 0; i < 20; i++) {
-      if (line >= lines.length) break;
-      if (!isSkipLine(lines[line])) break;
-      line = line + 1;
-    }
-    if (line > lines.length) line = lines.length;
-    return { line, character: 0 };
-  }
-
-  function isProofEndLine(line: string): boolean {
-    const t = line.trim();
-    return t === 'Qed.' || t === 'Admitted.' || t === 'Defined.';
-  }
-
-  function findProofLine(lines: string[], searchName: string): number {
-    const s = searchName.trim();
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i].trim();
-      const kw = l.split(/\s+/)[0];
-      if ((kw === 'Lemma' || kw === 'Theorem' || kw === 'Corollary' || kw === 'Example') &&
-          l.includes(s + ' :')) {
-        for (let j = i + 1; j < lines.length; j++) {
-          const t = (lines[j] || '').trim();
-          if (t === 'Proof.' || t.startsWith('Proof. ')) return j;
-          if (isTopLevelLine(lines[j] || '') || isProofEndLine(lines[j] || '')) break;
-        }
-      }
-    }
-    return -1;
-  }
-
-  function isTopLevelLine(line: string): boolean {
-    const t = line.trim();
-    const kw = t.split(/\s+/)[0];
-    return            kw === 'Lemma' || kw === 'Theorem' || kw === 'Definition' ||
-           kw === 'Fixpoint' || kw === 'Inductive' || kw === 'CoFixpoint' ||
-           kw === 'Corollary' || kw === 'Example' || kw === 'Remark' ||
-           kw === 'Fact' || kw === 'Goal' || kw === 'Require' ||
-           kw === 'Import' || kw === 'Export' || kw === 'From' ||
-           kw === 'Notation' || kw === 'Ltac' || kw === 'Module' ||
-           kw === 'End' || kw === 'Axiom' || kw === 'Parameter' ||
-           kw === 'CoInductive';
-  }
-
-  function insertPosition(text: string, pos: Position): Position {
-    const lines = text.split('\n');
-    let line = pos.line;
-    // Skip keyword/comment lines
-    for (let i = 0; i < 20; i++) {
-      if (line >= lines.length) break;
-      if (!isSkipLine(lines[line])) break;
-      line = line + 1;
-    }
-    // Skip past non-blank content but stop at proof-ending or toplevel keywords
-    for (let i = 0; i < 200; i++) {
-      if (line >= lines.length) break;
-      const l = (lines[line] || '').trim();
-      if (l === '') break;
-      if (isProofEndLine(lines[line] || '')) break;
-      if (isTopLevelLine(lines[line] || '')) break;
-      line = line + 1;
-    }
-    if (line > lines.length) line = lines.length;
-    return { line, character: 0 };
-  }
 
   /** Clamp a position to be within [0, lines.length-1] — never past EOF. */
   function safePos(pos: Position, text: string): Position {
@@ -1259,33 +1177,11 @@ async function main() {
             const firstWord = tactic.split(/\s+/)[0];
             const hasBullet = /^[-+*]+$/.test(firstWord) || firstWord === '{';
 
-            // Compute indent by analyzing the proof body text before insPos.
-            // Find the last bullet or tactic line and match its indent level.
+            // Compute indent by analyzing proof body text before the insert position.
             const atLineStart = insPos.character === 0;
-            let indent = '';
-            if (atLineStart && docLines && insPos.line > proofLine) {
-              let lastBulletIndent = -1;
-              let lastTacticIndent = -1;
-              for (let i = insPos.line - 1; i > proofLine; i--) {
-                const line = docLines[i] || '';
-                const trimmed = line.trimStart();
-                if (trimmed === '' || trimmed.startsWith('Proof.')) continue;
-                const lineIndent = line.length - trimmed.length;
-                const bulletMatch = trimmed.match(/^([-+*]+)\b/);
-                if (bulletMatch) {
-                  lastBulletIndent = lineIndent;
-                  break;
-                }
-                if (lastTacticIndent < 0) {
-                  lastTacticIndent = lineIndent;
-                }
-              }
-              if (lastBulletIndent >= 0) {
-                indent = ' '.repeat(Math.max(0, lastBulletIndent));
-              } else if (lastTacticIndent >= 0) {
-                indent = ' '.repeat(Math.max(0, lastTacticIndent));
-              }
-            }
+            let indent = atLineStart
+              ? computeBulletIndent(doc.text, insPos, proofLine)
+              : '';
 
             if (bullet && !hasBullet && tactic !== 'Qed.' && tactic !== 'Defined.' && tactic !== 'Admitted.') {
               tactic = `${indent}${bullet} ${tactic}`;

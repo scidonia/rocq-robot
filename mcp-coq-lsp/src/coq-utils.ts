@@ -95,3 +95,36 @@ export function findProofLine(lines: string[], searchName: string): number {
   }
   return -1;
 }
+
+/**
+ * Compute the indent for a new bullet or tactic line by analyzing the proof
+ * body text before `insPos`.  Scans backwards to find the last bullet or
+ * tactic line and returns a space-prefix string that matches its indentation.
+ */
+export function computeBulletIndent(
+  text: string,
+  insPos: Position,
+  proofLine: number,
+): string {
+  const lines = text.split('\n');
+  if (insPos.character !== 0) return '';
+  let lastBulletIndent = -1;
+  let lastTacticIndent = -1;
+  for (let i = insPos.line - 1; i > proofLine; i--) {
+    const line = lines[i] || '';
+    const trimmed = line.trimStart();
+    if (trimmed === '' || trimmed.startsWith('Proof.')) continue;
+    const lineIndent = line.length - trimmed.length;
+    const bulletMatch = trimmed.match(/^([-+*]+)\b/);
+    if (bulletMatch) {
+      lastBulletIndent = lineIndent;
+      break;
+    }
+    if (lastTacticIndent < 0) {
+      lastTacticIndent = lineIndent;
+    }
+  }
+  if (lastBulletIndent >= 0) return ' '.repeat(Math.max(0, lastBulletIndent));
+  if (lastTacticIndent >= 0) return ' '.repeat(Math.max(0, lastTacticIndent));
+  return '';
+}
