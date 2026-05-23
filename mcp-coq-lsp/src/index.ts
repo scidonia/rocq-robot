@@ -135,6 +135,8 @@ async function main() {
   // File history per file path — used by coq_undo to restore previous versions
   const fileHistory = new Map<string, string[]>();
   const MAX_HISTORY = 50;
+  // Track the last insertion per file — used by coq_insert_tactic replace:true
+  const lastInsertion = new Map<string, { range: Range }>();
 
   function isSkipLine(line: string): boolean {
     const trimmed = line.trim();
@@ -464,6 +466,7 @@ async function main() {
           description:
             'Insert a tactic into a proof and return updated goals. ' +
             'Auto-prepends bullet prefix (-, +, *) when proof state requires it. ' +
+            'Pass replace: true to replace the last inserted tactic (retry a failed tactic). ' +
             'Prefer explicit "as" clauses with induction/destruct for robust proofs.',
           inputSchema: {
             type: 'object',
@@ -474,6 +477,10 @@ async function main() {
               follow_with_goals: {
                 type: 'boolean',
                 description: 'Query goals after inserting',
+              },
+              replace: {
+                type: 'boolean',
+                description: 'Replace the last inserted tactic (retry a failed tactic)',
               },
             },
             required: ['file', 'name', 'tactic'],
@@ -1169,15 +1176,31 @@ async function main() {
 
         case 'coq_insert_tactic': {
           const rawPos = (args as any).position as Position | undefined;
-          const { file, name, tactic: rawTactic, follow_with_goals } = args as {
+          const { file, name, tactic: rawTactic, follow_with_goals, replace } = args as {
             file: string;
             name: string;
             tactic: string;
             follow_with_goals?: boolean;
+            replace?: boolean;
           };
 
           await ensureDocumentOpened(file);
           const doc = docManager.getDocument(file)!;
+
+          // If replacing, delete the last inserted tactic text from the file first
+          if (replace) {
+            const last = lastInsertion.get(file);
+            if (last) {
+              pushFileHistory(file, doc.text);
+              const cleanedText = docManager.applyEdits(doc.text, [{
+                range: last.range,
+                newText: '',
+              }]);
+              await docManager.updateDocument(file, cleanedText);
+              await docManager.saveDocument(file);
+              lastInsertion.delete(file);
+            }
+          }
 
           // Resolve position from name
           const docLines = doc.text.split('\n');
@@ -1423,6 +1446,11 @@ async function main() {
 
           // Compact summary of the new focus state for the response text
           const focusSummary = gcAfter ? compactGoalSummary(gcAfter) : '';
+
+          // Store this insertion for potential replace:true retry
+          lastInsertion.set(file, {
+            range: { start: insPos, end: nextTacticPosition },
+          });
 
           return reply(
             `${fileLine(file, position.line)} — inserted "${tactic.trim()}" → ${stateMsg}${focusSummary ? '\n  ' + focusSummary : ''}${scriptBlock}${hint ? '\n  next: ' + hint : ''}`,
@@ -2039,8 +2067,8 @@ async function main() {
                 l.includes(name + ' :') && (l.includes(name + ' :') || l.includes(name + ':'))) {
               const existingStmt = l.split(':').slice(1).join(':').trim().replace(/\.$/, '');
               if (existingStmt === statement.trim()) {
-                return reply(
-                  `${fileLine(file, i)} — Lemma ${name} already exists with same statement (no-op)`,
+            return reply(
+                    `${fileLine(file, i)} — Lemma ${name} already exists with same statement (no-op)`,
                   { exists: true, identical: true, line: i, proof: name, statement: existingStmt }
                 );
               }
