@@ -833,16 +833,16 @@ async function main() {
       const total = goals.length + bgGoals;
 
       if (total === 0) {
-        return 'Proof complete (or Admitted). Use coq_insert_tactic "Qed." to close.';
+        return 'Proof complete. You may close with Qed. or leave as Admitted.';
       }
       if (goals.length === 0 && bgGoals > 0) return `Bullet closed. ${bgGoals} goal(s) in background. Insert next bullet.`;
       if (goals.length === 1) {
-        if (bgGoals > 0) return `The current bullet ${bullet || '-'} is unfinished. 1 goal at focus, ${bgGoals} in background. Insert a tactic.`;
+        if (bgGoals > 0) return `Bullet open [${bullet || '-'}]. 1 goal at focus, ${bgGoals} in background.`;
         return '1 goal. Insert a tactic.';
       }
       const summary = compactGoalSummary(gc);
-      if (bgGoals > 0) return `The current bullet ${bullet || '-'} is unfinished. ${goals.length} goals at focus, ${bgGoals} in background. ${summary}`;
-      return `${goals.length} goals at focus. ${summary}${bullet ? ' (bullet ' + bullet + ')' : ''}`;
+      if (bgGoals > 0) return `Bullet open [${bullet || '-'}]. ${goals.length} goals at focus, ${bgGoals} in background. ${summary}`;
+      return `${goals.length} goals at focus. ${summary}${bullet ? ' [bullet ' + bullet + ']' : ''}`;
     }
 
     function formatFeedback(fb: Array<[number, string]>): string {
@@ -1221,12 +1221,12 @@ async function main() {
             const firstWord = tactic.split(/\s+/)[0];
             const hasBullet = /^[-+*]+$/.test(firstWord) || firstWord === '{';
 
-            // Compute indent from stack depth (only for line-start insertions)
-            // When no active bullet, treat nesting level as 0 regardless of stack entries
+            // Compute indent from stack depth (only for line-start insertions).
+            // Use stackDepth directly — the bullet prefix itself adds one level of nesting.
             const atLineStart = insPos.character === 0;
             const hasActiveBullet = !!stateResult.goals?.bullet;
             const stackDepth = hasActiveBullet ? (stateResult.goals?.stack || []).length : 0;
-            const indent = atLineStart ? '  '.repeat(stackDepth + 1) : '';
+            const indent = atLineStart ? '  '.repeat(stackDepth) : '';
 
             if (bullet && !hasBullet && tactic !== 'Qed.' && tactic !== 'Defined.' && tactic !== 'Admitted.') {
               tactic = `${indent}${bullet} ${tactic}`;
@@ -1354,10 +1354,40 @@ async function main() {
             : oneLineSplit ? 'inserted'
             : gcAfter === undefined || gcAfter === null
             ? 'goals query failed'
-            : nFocus === 0 && nBg === 0 ? 'done — try Qed'
+            : nFocus === 0 && nBg === 0 ? 'done — Qed applied'
             : nFocus === 0 ? `bullet closed, ${nBg} in background`
-            : nBg > 0 ? `${nFocus} at focus, ${nBg} in background (bullet unfinished)`
+            : nBg > 0 ? `${nFocus} at focus, ${nBg} in background (bullet open)`
             : `${nFocus} goal(s)`;
+
+          // Auto-close: when all goals are done, replace the Admitted. stub with Qed.
+          const hasErrors = (goals?.messages || []).some((m: any) => m.level === 1);
+          if (nFocus === 0 && nBg === 0 && gcAfter !== undefined && gcAfter !== null && !hasErrors) {
+            const currentDoc = docManager.getDocument(file);
+            if (currentDoc) {
+              const lines = currentDoc.text.split('\n');
+              // Find the Admitted. line starting from the insert position
+              let admittedLine = -1;
+              for (let i = insPos.line; i < lines.length; i++) {
+                if (lines[i].trim() === 'Admitted.') {
+                  admittedLine = i;
+                  break;
+                }
+              }
+              if (admittedLine >= 0) {
+                pushFileHistory(file, currentDoc.text);
+                const replaceEdit = {
+                  range: {
+                    start: { line: admittedLine, character: 0 },
+                    end: { line: admittedLine, character: lines[admittedLine].length },
+                  },
+                  newText: 'Qed.\n',
+                };
+                const newText = docManager.applyEdits(currentDoc.text, [replaceEdit]);
+                await docManager.updateDocument(file, newText);
+                await docManager.saveDocument(file);
+              }
+            }
+          }
 
           // Extract proof script for context
           const scriptLines: string[] = [];
@@ -1384,14 +1414,24 @@ async function main() {
             ? '\n-- proof script ----------\n' + scriptLines.map(l => `  ${l}`).join('\n')
             : '';
 
+          // Build a focused goals object for the reply — strip background (stack) goals
+          // to avoid confusing the display with Admitted-continuation state.
+          let focusedGoals = goals?.goals || null;
+          if (focusedGoals && nBg > 0) {
+            focusedGoals = { ...focusedGoals, stack: [] };
+          }
+
+          // Compact summary of the new focus state for the response text
+          const focusSummary = gcAfter ? compactGoalSummary(gcAfter) : '';
+
           return reply(
-            `${fileLine(file, position.line)} — inserted "${tactic.trim()}" → ${stateMsg}${scriptBlock}${hint ? '\n  next: ' + hint : ''}`,
+            `${fileLine(file, position.line)} — inserted "${tactic.trim()}" → ${stateMsg}${focusSummary ? '\n  ' + focusSummary : ''}${scriptBlock}${hint ? '\n  next: ' + hint : ''}`,
             {
               applied: true,
               inserted_until: insertedUntil,
               next_tactic_position: nextTacticPosition,
               next: hint,
-              goals: goals?.goals,
+              goals: focusedGoals,
               script: scriptLines,
               messages: goals?.messages || [],
               error: goals?.error || null,
