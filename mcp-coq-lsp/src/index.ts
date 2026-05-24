@@ -1161,34 +1161,51 @@ async function main() {
           // Auto-bullet: query proof state to determine if bullet prefix is needed
           let tactic = rawTactic.trim();
           try {
+            // Query at end of previous non-blank line to get correct stack depth
+            // after bullet closure (insPos is the start of a blank/clean line,
+            // which still reports the previous bullet context as active in Prev mode)
+            let queryLine = insPos.line - 1;
+            while (queryLine >= 0 && (docLines[queryLine] || '').trim() === '') {
+              queryLine--;
+            }
+            const queryPos = queryLine >= 0
+              ? { line: queryLine, character: (docLines[queryLine] || '').length }
+              : insPos;
             const stateResult = await retryDocumentNotReady(() =>
               lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
                 textDocument: { uri: doc.uri, version: doc.version },
-                position: insPos,
+                position: queryPos,
                 pp_format: 'Str',
-                mode: 'Prev',
+                mode: 'After',
               })
             );
             const bgCount = (stateResult.goals?.stack || []).reduce(
               (s: number, [b, a]: any[]) => s + (b?.length || 0) + (a?.length || 0), 0
             );
             const totalRemaining = (stateResult.goals?.goals?.length || 0) + bgCount;
-            const rawBullet = stateResult.goals?.bullet || (totalRemaining > 1 ? '-' : undefined);
+            
+            // Rotate bullet characters: -, +, *, -, +, *, ...
+            // This lets Coq's focus_stack grow properly (same character pops the prior).
+            const bulletChars = ['-', '+', '*'];
+            const activeLevels = (stateResult.goals?.stack || []).filter(
+              ([b, a]: any[]) => (b?.length || 0) + (a?.length || 0) > 0
+            ).length;
+            const nextBulletChar = bulletChars[activeLevels % bulletChars.length];
+            
+            const rawBullet = stateResult.goals?.bullet || (totalRemaining > 1 ? nextBulletChar : undefined);
             const bulletMatch = rawBullet?.match(/[-+*]+/);
             const bullet = bulletMatch ? bulletMatch[0] : (rawBullet === '-' || rawBullet === '+' || rawBullet === '*' ? rawBullet : undefined);
             const firstWord = tactic.split(/\s+/)[0];
             const hasBullet = /^[-+*]+$/.test(firstWord) || firstWord === '{';
 
-            // Compute indent based on current stack depth
+            // Compute indent fully first, then build tactic string with debug comment
             const atLineStart = insPos.character === 0;
             let indent = '';
 
             if (bullet && !hasBullet && atLineStart) {
-              // Use current stack depth from LSP - this is always accurate
-              const currentStackDepth = stateResult.goals?.stack?.length ?? 0;
-              indent = '  '.repeat(currentStackDepth);
+              // Indent from active stack levels (computed above for bullet rotation)
+              indent = '  '.repeat(activeLevels);
             } else if (atLineStart) {
-              // Non-bullet tactic: use text-based fallback
               indent = computeBulletIndent(doc.text, insPos, proofLine);
             }
 
@@ -1286,7 +1303,7 @@ async function main() {
           if (follow_with_goals ?? true) {
             try {
               const updatedDoc = docManager.getDocument(file)!;
-              const goalsQueryPos = safePos(nextTacticPosition, updatedDoc.text);
+              const goalsQueryPos = safePos({ line: insertedUntil.line, character: 0 }, updatedDoc.text);
               const goalsResult = await retryDocumentNotReady(() =>
                 lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
                   textDocument: {
