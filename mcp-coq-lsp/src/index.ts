@@ -228,6 +228,8 @@ async function main() {
     }
   }
 
+  // === LSP client setup ===
+
   // Create LSP client and document manager
   const lspClient = new RocqLspClient({
     rocqLspPath: config.rocqLspPath,
@@ -1177,21 +1179,17 @@ async function main() {
             const firstWord = tactic.split(/\s+/)[0];
             const hasBullet = /^[-+*]+$/.test(firstWord) || firstWord === '{';
 
-            // Compute indent by analyzing proof body text before the insert position.
+            // Compute indent based on current stack depth
             const atLineStart = insPos.character === 0;
-            let indent = atLineStart
-              ? computeBulletIndent(doc.text, insPos, proofLine)
-              : '';
+            let indent = '';
 
-            // When auto-bullet fires inside an active bullet AND the top stack
-            // level hasn't had any subgoals closed yet (before=0), this is the
-            // first subgoal of a new group — indent one level deeper.
-            const hasActiveBullet = !!stateResult.goals?.bullet;
-            const nFocusGoals = stateResult.goals?.goals?.length || 0;
-            const stack = stateResult.goals?.stack || [];
-            const topBefore = stack.length > 0 ? (stack[0]?.[0]?.length || 0) : 0;
-            if (bullet && !hasBullet && hasActiveBullet && nFocusGoals > 0 && topBefore === 0) {
-              indent += '  ';
+            if (bullet && !hasBullet && atLineStart) {
+              // Use current stack depth from LSP - this is always accurate
+              const currentStackDepth = stateResult.goals?.stack?.length ?? 0;
+              indent = '  '.repeat(currentStackDepth);
+            } else if (atLineStart) {
+              // Non-bullet tactic: use text-based fallback
+              indent = computeBulletIndent(doc.text, insPos, proofLine);
             }
 
             if (bullet && !hasBullet && tactic !== 'Qed.' && tactic !== 'Defined.' && tactic !== 'Admitted.') {
@@ -1199,6 +1197,7 @@ async function main() {
             } else if (atLineStart) {
               tactic = `${indent}${tactic}`;
             }
+
           } catch {
             // state query is best-effort for bullets
           }
@@ -1287,8 +1286,7 @@ async function main() {
           if (follow_with_goals ?? true) {
             try {
               const updatedDoc = docManager.getDocument(file)!;
-              // Query at the Admitted./Qed. line (after all inserted lines), same position focus uses.
-              const goalsQueryPos = safePos({ line: insertedUntil.line, character: 0 }, updatedDoc.text);
+              const goalsQueryPos = safePos(nextTacticPosition, updatedDoc.text);
               const goalsResult = await retryDocumentNotReady(() =>
                 lspClient.sendRequest<GoalAnswer<string>>('proof/goals', {
                   textDocument: {
@@ -1297,13 +1295,14 @@ async function main() {
                   },
                   position: goalsQueryPos,
                   pp_format: 'Str',
-                  mode: oneLineSplit ? 'Prev' : 'Prev',
+                  mode: 'Prev',
                 })
               );
               if (goalsResult.error) {
                 console.error('Goals query error:', goalsResult.error);
               }
               goals = goalsResult;
+              
             } catch (err) {
               console.error('Failed to get goals:', err);
             }
@@ -1314,6 +1313,7 @@ async function main() {
           const nBg = (gcAfter?.stack || []).reduce(
             (s: number, [b, a]: any[]) => s + (b?.length || 0) + (a?.length || 0), 0
           );
+          
           const hint = gcAfter ? nextHint(gcAfter) : '';
 
           const stateMsg = goals?.error
