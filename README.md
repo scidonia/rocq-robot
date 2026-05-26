@@ -1,4 +1,6 @@
-# Neurosymbolic Programming with Rocq LSP
+# 🤖 rocq-robot
+
+**Neurosymbolic Programming with Rocq LSP**
 
 ## Overview
 
