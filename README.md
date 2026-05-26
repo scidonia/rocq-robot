@@ -314,7 +314,7 @@ coq-lsp --version  # or rocq-lsp --version
 
 ### Installation
 ```bash
-cd rocq-robot/mcp-coq-lsp
+cd rocq-robot
 npm install
 npm run build
 ```
@@ -328,7 +328,7 @@ Add to your MCP settings:
     "rocq-robot": {
       "command": "node",
       "args": [
-        "/path/to/rocq-robot/mcp-coq-lsp/dist/index.js",
+        "/path/to/rocq-robot/dist/index.js",
         "--workspace-root",
         "/path/to/your/rocq/project"
       ]
@@ -351,7 +351,7 @@ OpenCode: "Proof complete! Here's what I did..."
 
 ## Real Proof Example: Preservation Theorem
 
-The repository includes a complete, working example in `mcp-coq-lsp/test_issues.v` demonstrating:
+The repository includes a complete, working example in `examples/test_issues.v` demonstrating:
 
 **Theorem**: Type preservation for PCF with references
 ```coq
@@ -379,7 +379,7 @@ This demonstrates **neurosymbolic theorem proving in action**: the LLM proposes 
 
 ## Additional Examples
 
-See `mcp-coq-lsp/example.v` for simpler examples including:
+See `examples/example.v` for simpler examples including:
 - A finished proof (to query goals)
 - An incomplete proof (to practice tactics)
 - Test cases for each MCP tool
@@ -418,9 +418,9 @@ As LLMs improve and proof assistants expose richer APIs:
 ## Learn More
 
 - **Specification**: See `MCP_COQ_LSP_SPEC.md`
-- **Implementation**: See `mcp-coq-lsp/IMPLEMENTATION.md`
-- **Quick Start**: See `mcp-coq-lsp/QUICKSTART.md`
-- **Project config detection**: See `mcp-coq-lsp/PROJECT-CONFIG-DETECTION.md`
+- **Implementation**: See `docs/IMPLEMENTATION.md`
+- **Quick Start**: See `docs/QUICKSTART.md`
+- **Project config detection**: See `docs/PROJECT-CONFIG-DETECTION.md`
 - **Rocq Documentation**: https://rocq-prover.org/
 - **rocq-lsp Project**: https://github.com/ejgallego/coq-lsp
 
