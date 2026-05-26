@@ -145,10 +145,12 @@ async function main() {
   const speculativeImports = new Map<string, string[]>();
 
   // File history per file path — used by coq_undo to restore previous versions
-  const fileHistory = new Map<string, string[]>();
+  const fileHistory = new Map<string, Array<{text: string, proof: string | null}>>();
   const MAX_HISTORY = 50;
   // Track the last insertion per file — used by coq_insert_tactic replace:true
   const lastInsertion = new Map<string, { range: Range }>();
+  // Track the active proof per file — used by coq_undo to scope undo to current proof
+  const currentProof = new Map<string, string>();
 
   /** Clamp a position to be within [0, lines.length-1] — never past EOF. */
   function safePos(pos: Position, text: string): Position {
@@ -156,10 +158,10 @@ async function main() {
     return { line: Math.min(pos.line, maxLine), character: 0 };
   }
 
-  function pushFileHistory(path: string, text: string) {
+  function pushFileHistory(path: string, text: string, proof?: string | null) {
     if (!fileHistory.has(path)) fileHistory.set(path, []);
     const stack = fileHistory.get(path)!;
-    stack.push(text);
+    stack.push({ text, proof: proof ?? null });
     if (stack.length > MAX_HISTORY) stack.shift();
     fileHistory.set(path, stack);
   }
@@ -213,6 +215,7 @@ async function main() {
       docManager.clear();
       speculativeImports.clear();
       fileHistory.clear();
+      currentProof.clear();
 
       // Await the restart, then retry — no need for the caller to retry manually.
       try {
@@ -304,7 +307,7 @@ async function main() {
   // Load skill guide content at startup
   const skillGuideUri = 'coq://skill-guide';
   const skillGuideContent = fs.readFileSync(
-    resolvePath(__dirname, '../../SKILL.md'), 'utf-8'
+    resolvePath(__dirname, '../SKILL.md'), 'utf-8'
   );
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({
@@ -334,7 +337,7 @@ async function main() {
     return {
       tools: [
         {
-          name: 'coq_open_goals',
+          name: 'open_goals',
           description:
             'Get current open goals for a proof in a Coq/Rocq file. ' +
             'Uses Prev mode by default. Takes a proof name.',
@@ -351,7 +354,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_proof_state',
+          name: 'proof_state',
           description:
             'Get richer proof context including proof name and statements',
           inputSchema: {
@@ -371,7 +374,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_get_state_at_pos',
+          name: 'snap_state',
           description:
             'Get an opaque state identifier from a file position (Pétanque)',
           inputSchema: {
@@ -393,7 +396,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_run_tactic',
+          name: 'exec_tactic',
           description:
             'Run a tactic/command against a state (speculative execution)',
           inputSchema: {
@@ -408,7 +411,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_goals_for_state',
+          name: 'state_goals',
           description: 'Get goals for a given state identifier',
           inputSchema: {
             type: 'object',
@@ -420,7 +423,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_apply_edit',
+          name: 'edit_file',
           description: 'Apply text edits to a file and re-sync with rocq-lsp. Use "find"/"replace" for simple text search-and-replace instead of computing line numbers.',
           inputSchema: {
             type: 'object',
@@ -465,7 +468,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_insert_tactic',
+          name: 'insert_tactic',
           description:
             'Insert a tactic into a proof and return updated goals. ' +
             'Auto-prepends bullet prefix (-, +, *) when proof state requires it. ' +
@@ -490,7 +493,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_search',
+          name: 'search_lemmas',
           description:
             'Search the Coq environment for lemmas and theorems. Simple names auto-quote (e.g. "plus_n_O"). ' +
             'Use parentheses for patterns: "(_ + 0 = _)" or just "_ + 0 = _". ' +
@@ -511,7 +514,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_check_term',
+          name: 'inspect_term',
           description:
             'Check the type of a term speculatively. Runs `Check <term>.` and returns the result.',
           inputSchema: {
@@ -530,7 +533,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_about',
+          name: 'inspect_about',
           description:
             'Get information about a term/definition speculatively. Runs `About <term>.` and returns the result.',
           inputSchema: {
@@ -549,7 +552,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_undo',
+          name: 'undo_step',
           description:
             'Restore the file to before the last N edit operations (coq_insert_tactic or coq_apply_edit). Uses operation history, not span counting.',
           inputSchema: {
@@ -565,7 +568,7 @@ async function main() {
           },
         },
         {
-           name: 'coq_try_tactic',
+           name: 'try_step',
           description:
             'Single-call speculative tactic execution: get state, run tactic, and return updated goals. ' +
             'Position is optional — uses "name" or cursor. Does not modify the file.',
@@ -581,7 +584,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_check',
+          name: 'check_file',
           description: 'Force document checking and return completion status',
           inputSchema: {
             type: 'object',
@@ -592,7 +595,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_check_range',
+          name: 'check_range',
           description: 'Check a specific line range in a Coq file and return diagnostics',
           inputSchema: {
             type: 'object',
@@ -626,7 +629,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_require',
+          name: 'require_lib',
           description:
             'Require a library speculatively. Runs `Require Import <lib>.` against the file environment. ' +
             'Subsequent speculative queries on the same file will see the library. Does not modify the file.',
@@ -646,7 +649,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_locate',
+          name: 'locate_term',
           description:
             'Find where a library, module, or term is defined. Runs `Locate <thing>.` speculatively. ' +
             'Useful before Require to check if a module exists.',
@@ -666,7 +669,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_focus',
+          name: 'focus_proof',
           description:
             'Get full proof tree: current goals, bullet stack depth/levels, ' +
             'and the proof script up to the given position. ' +
@@ -688,7 +691,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_reset_proof',
+          name: 'reset_proof',
           description:
             'Wipe the proof body (from Proof. to Qed./Admitted.) and replace with fresh Admitted. ' +
             'Use this to start over on a broken proof.',
@@ -702,7 +705,7 @@ async function main() {
           },
         },
         {
-          name: 'coq_add_lemma',
+          name: 'add_lemma',
           description:
             'Insert a lemma stub (Lemma name : statement. Proof. Admitted.) ' +
             'above a specified proof. Use "before" to name which proof it goes above. ' +
@@ -869,7 +872,7 @@ async function main() {
 
     try {
       switch (name) {
-        case 'coq_open_goals': {
+        case 'open_goals': {
           const { file, name, pp_format, compact, mode } = args as {
             file: string;
             name: string;
@@ -877,6 +880,8 @@ async function main() {
             compact?: boolean;
             mode?: string;
           };
+
+          currentProof.set(file, name);
 
           let position: Position;
           if (name) {
@@ -913,7 +918,7 @@ async function main() {
           return reply(`${fileLine(file, position.line)} — ${ngoals} goal(s)`, result);
         }
 
-        case 'coq_proof_state': {
+        case 'proof_state': {
           const { file, position } = args as {
             file: string;
             position: Position;
@@ -951,11 +956,13 @@ async function main() {
           );
         }
 
-        case 'coq_focus': {
+        case 'focus_proof': {
           const { file, name } = args as {
             file: string;
             name: string;
           };
+
+          currentProof.set(file, name.trim());
 
           const doc = await ensureDocumentOpened(file);
           const docLines = doc.text.split('\n');
@@ -1045,7 +1052,7 @@ async function main() {
           });
         }
 
-        case 'coq_get_state_at_pos': {
+        case 'snap_state': {
           const { file, position, memo, hash } = args as {
             file: string;
             position: Position;
@@ -1073,7 +1080,7 @@ async function main() {
           );
         }
 
-        case 'coq_run_tactic': {
+        case 'exec_tactic': {
           const { state_id, tactic, memo, hash } = args as {
             state_id: number;
             tactic: string;
@@ -1097,7 +1104,7 @@ async function main() {
           );
         }
 
-        case 'coq_goals_for_state': {
+        case 'state_goals': {
           const { state_id, compact } = args as {
             state_id: number;
             compact?: boolean;
@@ -1117,7 +1124,7 @@ async function main() {
           );
         }
 
-        case 'coq_apply_edit': {
+        case 'edit_file': {
           const { file, edits, find, replace } = args as {
             file: string;
             edits?: Array<{ range: Range; newText: string }>;
@@ -1159,7 +1166,7 @@ async function main() {
           }
 
           // Apply edits
-          pushFileHistory(file, doc.text);
+          pushFileHistory(file, doc.text, currentProof.get(file));
           const newText = docManager.applyEdits(doc.text, resolvedEdits);
 
           // Update and save
@@ -1190,7 +1197,7 @@ async function main() {
           );
         }
 
-        case 'coq_insert_tactic': {
+        case 'insert_tactic': {
           const rawPos = (args as any).position as Position | undefined;
           const { file, name, tactic: rawTactic, follow_with_goals, replace } = args as {
             file: string;
@@ -1200,14 +1207,16 @@ async function main() {
             replace?: boolean;
           };
 
+          currentProof.set(file, name);
+
           await ensureDocumentOpened(file);
-          const doc = docManager.getDocument(file)!;
+          let doc = docManager.getDocument(file)!;
 
           // If replacing, delete the last inserted tactic text from the file first
           if (replace) {
             const last = lastInsertion.get(file);
             if (last) {
-              pushFileHistory(file, doc.text);
+              pushFileHistory(file, doc.text, currentProof.get(file));
               const cleanedText = docManager.applyEdits(doc.text, [{
                 range: last.range,
                 newText: '',
@@ -1219,9 +1228,45 @@ async function main() {
           }
 
           // Resolve position from name
-          const docLines = doc.text.split('\n');
-          const proofLine = findProofLine(docLines, name);
-          if (proofLine < 0) throw new Error(`Proof not found: "${name}"`);
+          let docLines = doc.text.split('\n');
+          let proofLine = findProofLine(docLines, name);
+
+          // If Proof. line is missing, try to find the theorem and inject one
+          let injectedProof = false;
+          if (proofLine < 0) {
+            // Find the theorem/lemma declaration line
+            const s = name.trim();
+            let theoLine = -1;
+            for (let i = 0; i < docLines.length; i++) {
+              const l = docLines[i].trim();
+              const kw = l.split(/\s+/)[0];
+              if ((kw === 'Lemma' || kw === 'Theorem' || kw === 'Corollary' || kw === 'Example') &&
+                  l.includes(s + ' :')) {
+                theoLine = i;
+                break;
+              }
+            }
+            if (theoLine < 0) throw new Error(`Proof not found: "${name}"`);
+            // Scan from theoLine+1 to find where Proof. should go — before first non-blank content
+            let insertHere = theoLine + 1;
+            while (insertHere < docLines.length && (docLines[insertHere] || '').trim() === '') {
+              insertHere++;
+            }
+            // Inject Proof. line
+            const withProof = docManager.applyEdits(doc.text, [{
+              range: { start: { line: insertHere, character: 0 }, end: { line: insertHere, character: 0 } },
+              newText: 'Proof.\n',
+            }]);
+            await docManager.updateDocument(file, withProof);
+            await docManager.saveDocument(file);
+            // Refresh doc and retry
+            doc = docManager.getDocument(file)!;
+            docLines = doc.text.split('\n');
+            proofLine = findProofLine(docLines, name);
+            if (proofLine < 0) throw new Error(`Proof not found: "${name}"`);
+            injectedProof = true;
+          }
+
           const position = { line: proofLine, character: 0 };
 
           // Advance past Proof. and blank lines to the actual insert point
@@ -1369,7 +1414,7 @@ async function main() {
               ? (insPos.character || 0) + contentLines[0].length
               : contentLines[lastIdx].length,
           };
-          pushFileHistory(file, doc.text);
+          pushFileHistory(file, doc.text, currentProof.get(file));
           const preEditVersion = doc.version;
           const preEditText = doc.text;
 
@@ -1445,7 +1490,7 @@ async function main() {
                 }
               }
               if (admittedLine >= 0) {
-                pushFileHistory(file, currentDoc.text);
+                pushFileHistory(file, currentDoc.text, currentProof.get(file));
                 const replaceEdit = {
                   range: {
                     start: { line: admittedLine, character: 0 },
@@ -1515,7 +1560,7 @@ async function main() {
           );
         }
 
-        case 'coq_check': {
+        case 'check_file': {
           const { file } = args as { file: string };
 
           try {
@@ -1579,12 +1624,21 @@ async function main() {
                   kw === 'Definition' || kw === 'Fixpoint' || kw === 'Inductive' ||
                   kw === 'Example') {
                 const namePart = l.split(':')[0].replace(kw, '').trim();
-                // Extract type/statement (everything after first colon)
                 const colonIdx = l.indexOf(':');
                 let typeStr = '';
                 if (colonIdx >= 0) {
-                  typeStr = l.slice(colonIdx + 1).trim().replace(/\.$/, '');
-                  if (typeStr.length > 80) typeStr = typeStr.slice(0, 77) + '...';
+                  typeStr = l.slice(colonIdx + 1).trim();
+                  // Read continuation lines (indented or non-keyword lines)
+                  for (let c = i + 1; c < docLines.length; c++) {
+                    const cl = docLines[c].trim();
+                    if (!cl || cl === 'Proof.' || cl === 'Proof. Admitted.' || cl === 'Proof. Qed.' ||
+                        cl === 'Qed.' || cl === 'Admitted.' || cl === 'Defined.' ||
+                        isTopLevelLine(docLines[c] || '')) break;
+                    typeStr += ' ' + cl;
+                  }
+                  typeStr = typeStr.replace(/\.$/, '').trim();
+                  const maxLen = 120;
+                  if (typeStr.length > maxLen) typeStr = typeStr.slice(0, maxLen - 3) + '...';
                 }
                 let status = '?';
                 for (let j = i + 1; j < docLines.length; j++) {
@@ -1593,8 +1647,7 @@ async function main() {
                   if (t === 'Admitted.') { status = 'Admitted'; break; }
                   if (isTopLevelLine(docLines[j] || '')) { status = 'open'; break; }
                 }
-                const typePart = typeStr ? ` : ${typeStr}` : '';
-                items.push(`${kw} ${namePart}${typePart}: ${status} (L${i + 1})`);
+                items.push(`${kw} ${namePart} : ${typeStr || '?'}  [${status}]`);
               }
             }
             const summary = items.length > 0 ? '\n' + items.join('\n') : '';
@@ -1611,7 +1664,7 @@ async function main() {
           }
         }
 
-        case 'coq_check_range': {
+        case 'check_range': {
           const { file, range } = args as { 
             file: string; 
             range: { start: { line: number; character?: number }; end: { line: number; character?: number } };
@@ -1656,7 +1709,7 @@ async function main() {
           }
         }
 
-        case 'coq_search': {
+        case 'search_lemmas': {
           const { file, pattern } = args as {
             file: string;
             pattern: string;
@@ -1724,7 +1777,7 @@ async function main() {
           );
         }
 
-        case 'coq_check_term': {
+        case 'inspect_term': {
           const { file, term } = args as {
             file: string;
             term: string;
@@ -1769,7 +1822,7 @@ async function main() {
           );
         }
 
-        case 'coq_about': {
+        case 'inspect_about': {
           const { file, term } = args as {
             file: string;
             term: string;
@@ -1814,7 +1867,7 @@ async function main() {
           );
         }
 
-        case 'coq_undo': {
+        case 'undo_step': {
           const { file, n } = args as {
             file: string;
             n?: number;
@@ -1826,30 +1879,51 @@ async function main() {
           if (stack.length === 0) {
             throw new Error(`Nothing to undo for ${file}`);
           }
-          if (stack.length < count) {
-            throw new Error(`Can only undo ${stack.length} operation(s), requested ${count}`);
+
+          const activeProof = currentProof.get(file);
+          if (!activeProof) {
+            throw new Error(`No active proof for ${file} — use coq_focus or coq_open_goals first to set proof scope`);
           }
 
-          const restoreIdx = stack.length - count;
-          const restoreText = stack[restoreIdx];
-          fileHistory.set(file, stack.slice(0, restoreIdx));
+          // Count matching entries from the end, skipping non-matching ones
+          const matchingIndices: number[] = [];
+          for (let i = stack.length - 1; i >= 0 && matchingIndices.length < count; i--) {
+            if (stack[i].proof === activeProof) {
+              matchingIndices.push(i);
+            }
+          }
+
+          if (matchingIndices.length < count) {
+            const available = matchingIndices.length;
+            throw new Error(`Can only undo ${available} operation(s) in proof "${activeProof}", requested ${count}`);
+          }
+
+          // Restore to the state before the oldest matching entry
+          const oldestIdx = matchingIndices[matchingIndices.length - 1];
+          const restoreText = stack[oldestIdx].text;
+
+          // Remove all matching entries
+          const keep = stack.filter((_, i) => !matchingIndices.includes(i));
+          fileHistory.set(file, keep);
 
           await docManager.updateDocument(file, restoreText);
           await docManager.saveDocument(file);
 
           return reply(
-            `${fileLine(file, 0)} — undone ${count} operation(s), ${restoreIdx} remaining in history`,
-            { applied: true, undone: count, remaining_history: restoreIdx }
+            `${fileLine(file, 0)} — undone ${count} operation(s) in proof "${activeProof}", ${keep.length} remaining in history`,
+            { applied: true, undone: count, remaining_history: keep.length, proof: activeProof }
           );
         }
 
-        case 'coq_try_tactic': {
+        case 'try_step': {
           const { file, name, tactic, compact } = args as {
             file: string;
             name: string;
             tactic: string;
             compact?: boolean;
           };
+
+          currentProof.set(file, name);
 
           const doc = await ensureDocumentOpened(file);
           const docLines = doc.text.split('\n');
@@ -1940,7 +2014,7 @@ async function main() {
           );
         }
 
-        case 'coq_require': {
+        case 'require_lib': {
           const { file, lib } = args as {
             file: string;
             lib: string;
@@ -1994,7 +2068,7 @@ async function main() {
           );
         }
 
-        case 'coq_locate': {
+        case 'locate_term': {
           const { file, thing } = args as {
             file: string;
             thing: string;
@@ -2041,7 +2115,7 @@ async function main() {
           );
         }
 
-        case 'coq_reset_proof': {
+        case 'reset_proof': {
           const { file, name } = args as {
             file: string;
             name: string;
@@ -2096,7 +2170,7 @@ async function main() {
           );
         }
 
-        case 'coq_add_lemma': {
+        case 'add_lemma': {
           const { file, name, statement, before } = args as {
             file: string;
             name: string;
@@ -2147,6 +2221,7 @@ async function main() {
           }
 
           const block = `\nLemma ${name} : ${statement}.\nProof.\nAdmitted.\n\n`;
+          pushFileHistory(file, doc.text, null);
           const newText = docManager.applyEdits(doc.text, [{
             range: { start: { line: targetLine, character: 0 }, end: { line: targetLine, character: 0 } },
             newText: block,
@@ -2154,6 +2229,7 @@ async function main() {
 
           await docManager.updateDocument(file, newText);
           await docManager.saveDocument(file);
+          currentProof.set(file, name);
 
           // Lint: check the inserted range for errors
           try {
