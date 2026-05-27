@@ -860,8 +860,7 @@ async function main() {
         const parts: string[] = [];
         if (hnames) parts.push(`hyps: ${hnames}`);
         const oneline = (g.ty || '').replace(/\s+/g, ' ');
-        const short = oneline.length > 70 ? oneline.slice(0, 67) + '…' : oneline;
-        if (short) parts.push(`⊢ ${short}`);
+        if (oneline) parts.push(`⊢ ${oneline}`);
         return parts.join(' | ');
       }
       return `${gl.length} goals`;
@@ -1698,8 +1697,6 @@ async function main() {
                     typeStr += ' ' + cl;
                   }
                   typeStr = typeStr.replace(/\.$/, '').trim();
-                  const maxLen = 120;
-                  if (typeStr.length > maxLen) typeStr = typeStr.slice(0, maxLen - 3) + '...';
                 }
                 let status = '?';
                 for (let j = i + 1; j < docLines.length; j++) {
