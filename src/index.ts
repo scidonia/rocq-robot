@@ -2393,12 +2393,12 @@ async function main() {
             await docManager.closeDocument(file);
             await ensureDocumentOpened(file);
             const freshDoc = docManager.getDocument(file)!;
+            const lastLine = Math.max(0, freshDoc.text.split('\n').length - 1);
             await retryDocumentNotReady(() =>
-              lspClient.sendRequest('proof/goals', {
-                textDocument: { uri: freshDoc.uri, version: freshDoc.version },
-                position: { line: 0, character: 0 },
-                pp_format: 'Str',
-                mode: 'After',
+              lspClient.sendRequest<RunResult<number>>('petanque/get_state_at_pos', {
+                uri: freshDoc.uri,
+                position: { line: lastLine, character: 0 },
+                opts: { memo: false, hash: false },
               })
             );
           } catch (e) {
