@@ -98,6 +98,21 @@ function parseArgs() {
 async function main() {
   const config = parseArgs();
 
+  // Global crash logging — write to same debug log as lsp-client
+  const DBG = '/tmp/mcp-coq-lsp-debug.log';
+  function crash(msg: string) {
+    try { fs.appendFileSync(DBG, `[${new Date().toISOString()}] CRASH: ${msg}\n`); } catch {}
+  }
+  process.on('uncaughtException', (err) => {
+    crash(`uncaughtException: ${err.stack || err.message || String(err)}`);
+    console.error('[mcp-coq-lsp] CRASH:', err);
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason: any) => {
+    crash(`unhandledRejection: ${reason?.stack || reason?.message || String(reason)}`);
+    console.error('[mcp-coq-lsp] UNHANDLED REJECTION:', reason);
+  });
+
   // Determine workspace root
   const workspaceRoot = config.workspaceRoot || process.cwd();
 
@@ -254,18 +269,20 @@ async function main() {
       return doc;
     } catch (err: any) {
       if (err?.message === 'LSP client not started') {
-        // LSP isn't running — try to start it
-        lspClient.restart({
-          workspaceRoot: activeWorkspaceRoot,
-          rocqLspArgs: computeRocqLspArgs(activeWorkspaceRoot),
-        }).then(() => {
-          console.error('[mcp-coq-lsp] Auto-restart complete');
-        }).catch(err => {
-          console.error('[mcp-coq-lsp] Auto-restart failed:', err);
-        });
-        const e = new Error('LSP client not started — please retry');
-        (e as any).retryAfter = 5000;
-        throw e;
+        // LSP isn't running — restart it and wait for it to be ready
+        console.error('[mcp-coq-lsp] LSP not started, restarting...');
+        try {
+          await lspClient.restart({
+            workspaceRoot: activeWorkspaceRoot,
+            rocqLspArgs: computeRocqLspArgs(activeWorkspaceRoot),
+          });
+          console.error('[mcp-coq-lsp] Auto-restart complete, retrying document open');
+          await sleep(200);
+          return await docManager.openDocument(path);
+        } catch (restartErr: any) {
+          console.error('[mcp-coq-lsp] Auto-restart failed:', restartErr);
+          throw new Error('LSP client not started — please retry');
+        }
       }
       throw err;
     }
@@ -1345,10 +1362,12 @@ async function main() {
 
           // Advance past Proof. and blank lines to the actual insert point
           let insPos: Position;
+          let fromAdmitReplacement = false;
           const admitPos = lastAdmitReplaced.get(file);
           if (admitPos !== undefined) {
             // replace_admit set this — insert at the reopened bullet position
             insPos = { line: admitPos, character: 0 };
+            fromAdmitReplacement = true;
             lastAdmitReplaced.delete(file);
           } else {
             insPos = insertPosition(doc.text, position);
@@ -1372,6 +1391,7 @@ async function main() {
           if (tactic.length > 0 && !tactic.endsWith('.')) {
             tactic = tactic + '.';
           }
+          if (!fromAdmitReplacement) {
           try {
             // Query at end of previous non-blank line to get correct stack depth
             // after bullet closure (insPos is the start of a blank/clean line,
@@ -1435,6 +1455,7 @@ async function main() {
 
           } catch {
             // state query is best-effort for bullets
+          }
           }
 
           // Speculative check: run tactic via Pétanque before editing the file.
@@ -2626,6 +2647,7 @@ async function main() {
       }
     } catch (error) {
       const e = error as Error & { data?: unknown };
+      crash(`handler error in "${name}": ${e.stack || e.message}`);
       return err(
         `${name}: ${e.message}`,
         String(e.data ?? e.message)
