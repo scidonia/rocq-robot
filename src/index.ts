@@ -1046,6 +1046,7 @@ async function main() {
             name: string;
           };
 
+          if (!name || !file) throw new Error('file and name are required');
           currentProof.set(file, name.trim());
 
           const doc = await ensureDocumentOpened(file);
