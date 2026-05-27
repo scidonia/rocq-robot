@@ -147,7 +147,7 @@ Qed.
 Lemma test_admits : True /\ True /\ True /\ True.
 Proof.
 split.
-- admit.
+- 
 - split.
   + split.
     * admit.
@@ -155,6 +155,7 @@ split.
   + split.
     * exact I.
     * admit.
+    admit.
 Admitted.
 
 
