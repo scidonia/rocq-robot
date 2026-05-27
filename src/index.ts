@@ -1491,7 +1491,9 @@ async function main() {
             }
           } catch (e: any) {
             const msg = e?.message || String(e);
-            if (msg.includes('illegal begin of vernac') ||
+            if (msg.includes('timeout') || msg.includes('Timeout')) {
+              speculativeError = `proof check timed out — tactic may be too slow. Try a simpler tactic or split into steps.`;
+            } else if (msg.includes('illegal begin of vernac') ||
                 msg.includes('No proof-editing in progress') ||
                 msg.includes('proof-editing') ||
                 (tactic === 'Qed.' || tactic === 'Defined.' || tactic === 'Admitted.')) {
@@ -1605,7 +1607,17 @@ async function main() {
             }
           }
 
+          // If goals query failed, roll back the tactic insertion.
+          // A slow tactic may have been inserted but the state is unknown.
           const gcAfter = goals?.goals;
+          if (!gcAfter && !oneLineSplit) {
+            await docManager.updateDocument(file, preEditText);
+            await docManager.saveDocument(file);
+            return reply(
+              `${fileLine(file, position.line)} — inserted "${tactic.trim()}" but goals query failed — tactic rolled back`,
+              { applied: false, error: 'goals query failed after insertion', rolled_back: true }
+            );
+          }
           const nFocus = gcAfter?.goals?.length ?? 0;
           const nBg = (gcAfter?.stack || []).reduce(
             (s: number, [b, a]: any[]) => s + (b?.length || 0) + (a?.length || 0), 0
