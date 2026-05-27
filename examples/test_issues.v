@@ -244,28 +244,6 @@ split.
   + exact I.
   + exact I.
 Qed.
-
-
-
-Lemma test_inversion : forall S t T, has_type [] S t T -> has_type [TyNat] S t T.
-Proof.
-  intros S t T Hty. remember [] as G. induction Hty; subst G.
-  - destruct x; simpl in H; discriminate.
-  - apply T_Num.
-  - apply T_Bool.
-  - apply T_Succ; apply IHHty; auto.
-  - apply T_Pred; apply IHHty; auto.
-  - apply T_IsZero; apply IHHty; auto.
-  - apply T_If; [apply IHHty1 | apply IHHty2 | apply IHHty3]; auto.
-  - apply T_Lam; simpl; apply IHHty; auto.
-  - apply T_App; [apply IHHty1 | apply IHHty2]; auto.
-  - apply T_Fix; simpl; apply IHHty; auto.
-  - apply T_Ref; apply IHHty; auto.
-  - apply T_Deref; apply IHHty; auto.
-  - apply T_Assign; [apply IHHty1 | apply IHHty2]; auto.
-  - apply T_Loc; exact H.
-Qed.
-
 Theorem preservation : forall t mu t' mu' T S,
   has_type [] S t T -> step t mu t' mu' ->
   heap_ok mu S ->
