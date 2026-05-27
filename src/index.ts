@@ -29,6 +29,7 @@ import type {
 import * as fs from 'fs';
 import { dirname, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
+import { createHash } from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -751,6 +752,35 @@ async function main() {
               count: { type: 'number', description: 'Number of tactic lines to remove (default: 1)' },
             },
             required: ['file', 'name'],
+          },
+        },
+        {
+          name: 'list_admitted',
+          description:
+            'List all admit. lines within a proof body with their goal hashes. ' +
+            'Returns line numbers, goal summaries, and hashes for use with replace_admit.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file: { type: 'string', description: 'Path to a .v file' },
+              name: { type: 'string', description: 'Proof name (e.g. "preservation")' },
+            },
+            required: ['file', 'name'],
+          },
+        },
+        {
+          name: 'replace_admit',
+          description:
+            'Replace a specific admit. line identified by hash from list_admitted. ' +
+            'Removes the admit line, reopening the bullet for new tactics.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file: { type: 'string', description: 'Path to a .v file' },
+              name: { type: 'string', description: 'Proof name (e.g. "preservation")' },
+              hash: { type: 'string', description: 'Hash from list_admitted identifying which admit to replace' },
+            },
+            required: ['file', 'name', 'hash'],
           },
         },
       ],
@@ -2473,6 +2503,111 @@ async function main() {
           return reply(
             `${fileLine(file, 0)} — removed ${toRemove.length} tactic(s) from proof "${name}"`,
             { applied: true, removed: toRemove.length }
+          );
+        }
+
+        case 'list_admitted': {
+          const { file, name } = args as { file: string; name: string };
+          const doc = await ensureDocumentOpened(file);
+          const docLines = doc.text.split('\n');
+          const proofLine = findProofLine(docLines, name);
+          if (proofLine < 0) throw new Error(`Proof not found: "${name}"`);
+
+          // Find the Admitted./Qed. closing
+          let endLine = -1;
+          for (let i = proofLine + 1; i < docLines.length; i++) {
+            const l = docLines[i].trim();
+            if (l === 'Admitted.' || l === 'Qed.' || l === 'Defined.') { endLine = i; break; }
+          }
+          if (endLine < 0) throw new Error('No Admitted./Qed. found');
+
+          const admitted: Array<{ hash: string; line: number; goal: string }> = [];
+          for (let i = proofLine + 1; i < endLine; i++) {
+            if (docLines[i].trim() === 'admit.') {
+              try {
+                const stateR = await retryDocumentNotReady(() =>
+                  lspClient.sendRequest<RunResult<number>>('petanque/get_state_at_pos', {
+                    uri: doc.uri,
+                    position: { line: i, character: 0 },
+                    opts: { memo: false },
+                  })
+                );
+                const goalsR = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
+                  st: stateR.st,
+                  opts: { compact: true },
+                });
+                const goalText = (goalsR.goals || []).map(g => (g.ty || '').replace(/\s+/g, ' ')).join(' | ');
+                const hash = createHash('md5').update(goalText).digest('hex').slice(0, 8);
+                admitted.push({ hash, line: i + 1, goal: goalText || '(no goals)' });
+              } catch {
+                admitted.push({ hash: 'error', line: i + 1, goal: '(could not query)' });
+              }
+            }
+          }
+
+          return reply(
+            `${admitted.length} admit(s) in proof "${name}"` +
+            (admitted.length > 0 ? '\n' + admitted.map(a => `${a.hash}  L${a.line}: ${a.goal}`).join('\n') : ''),
+            { admitted }
+          );
+        }
+
+        case 'replace_admit': {
+          const { file, name, hash } = args as { file: string; name: string; hash: string };
+          const doc = await ensureDocumentOpened(file);
+          const docLines = doc.text.split('\n');
+          const proofLine = findProofLine(docLines, name);
+          if (proofLine < 0) throw new Error(`Proof not found: "${name}"`);
+
+          let endLine = -1;
+          for (let i = proofLine + 1; i < docLines.length; i++) {
+            const l = docLines[i].trim();
+            if (l === 'Admitted.' || l === 'Qed.' || l === 'Defined.') { endLine = i; break; }
+          }
+          if (endLine < 0) throw new Error('No Admitted./Qed. found');
+
+          // Find matching admit by hash
+          let targetLine = -1;
+          for (let i = proofLine + 1; i < endLine; i++) {
+            if (docLines[i].trim() === 'admit.') {
+              try {
+                const stateR = await retryDocumentNotReady(() =>
+                  lspClient.sendRequest<RunResult<number>>('petanque/get_state_at_pos', {
+                    uri: doc.uri,
+                    position: { line: i, character: 0 },
+                    opts: { memo: false },
+                  })
+                );
+                const goalsR = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
+                  st: stateR.st,
+                  opts: { compact: true },
+                });
+                const goalText = (goalsR.goals || []).map(g => (g.ty || '').replace(/\s+/g, ' ')).join(' | ');
+                const h = createHash('md5').update(goalText).digest('hex').slice(0, 8);
+                if (h === hash) { targetLine = i; break; }
+              } catch {}
+            }
+          }
+
+          if (targetLine < 0) throw new Error(`No admit found with hash "${hash}"`);
+
+          pushFileHistory(file, doc.text, currentProof.get(file));
+          // Remove the admit. line — bullet is now open for new tactics.
+          // If user doesn't close the bullet, the proof's final Admitted. covers it.
+          const newText = docManager.applyEdits(doc.text, [{
+            range: { start: { line: targetLine, character: 0 }, end: { line: targetLine + 1, character: 0 } },
+            newText: '',
+          }]);
+
+          await docManager.updateDocument(file, newText);
+          await docManager.saveDocument(file);
+
+          // Set the active proof so undo/focus are scoped correctly
+          currentProof.set(file, name);
+
+          return reply(
+            `${fileLine(file, targetLine)} — removed admit at L${targetLine + 1}, bullet reopened. Use insert_tactic now.`,
+            { applied: true, hash, line: targetLine + 1 }
           );
         }
 
