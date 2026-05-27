@@ -1327,7 +1327,7 @@ async function main() {
             const prefix = admitPrefix(admitLine);
             const newText = docManager.applyEdits(doc.text, [{
               range: { start: { line: targetLine, character: 0 }, end: { line: targetLine + 1, character: 0 } },
-              newText: prefix ? `${prefix.trim()}\n` : '',
+              newText: prefix ? `${prefix}\n` : '',
             }]);
             pushFileHistory(file, doc.text, null);
             await docManager.updateDocument(file, newText);
