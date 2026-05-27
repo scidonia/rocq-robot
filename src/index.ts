@@ -1316,6 +1316,10 @@ async function main() {
 
           // Auto-bullet: query proof state to determine if bullet prefix is needed
           let tactic = rawTactic.trim();
+          // Auto-`.`: append period if caller forgot it (e.g. "intros H" → "intros H.")
+          if (tactic.length > 0 && !tactic.endsWith('.')) {
+            tactic = tactic + '.';
+          }
           try {
             // Query at end of previous non-blank line to get correct stack depth
             // after bullet closure (insPos is the start of a blank/clean line,
@@ -1982,6 +1986,10 @@ async function main() {
 
           currentProof.set(file, name);
 
+          // Auto-`.`: append period if caller forgot it
+          let t = tactic.trim();
+          if (t.length > 0 && !t.endsWith('.')) t = t + '.';
+
           const doc = await ensureDocumentOpened(file);
           const docLines = doc.text.split('\n');
           const proofLine = findProofLine(docLines, name);
@@ -2003,7 +2011,7 @@ async function main() {
 
           async function tryRunTactic(st: number) {
             const r = await lspClient.sendRequest<RunResult<number>>('petanque/run', {
-              st, tac: tactic, opts: { memo: true, hash: true },
+              st, tac: t, opts: { memo: true, hash: true },
             });
             const g = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
               st: r.st, opts: { compact: compact ?? true },
@@ -2066,7 +2074,7 @@ async function main() {
           }
 
           return reply(
-            `"${tactic}" at ${fileLine(file, position.line)} → ${nGoals} goal(s)${finished}${goalText}`,
+            `"${t}" at ${fileLine(file, position.line)} → ${nGoals} goal(s)${finished}${goalText}`,
             { state_id: runResult.st, proof_finished: runResult.proof_finished, goals: goalsResult, feedback: runResult.feedback }
           );
         }
