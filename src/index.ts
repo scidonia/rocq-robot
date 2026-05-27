@@ -1403,13 +1403,19 @@ async function main() {
           let failedError: string = '';
           if (dotCount > 1 && !fromAdmitReplacement) {
             subTactics = tactic.split('.').filter(s => s.trim()).map(s => s.trim() + '.');
-            let stateId: number | null = null;
+            // Query state at the position INSIDE the proof (before Admitted./blank),
+            // not at insPos which may be outside proof mode.
+            let queryLine = insPos.line - 1;
+            while (queryLine >= 0 && (docLines[queryLine] || '').trim() === '') queryLine--;
+            const queryPos = queryLine >= 0
+              ? { line: queryLine, character: (docLines[queryLine] || '').length }
+              : insPos;
             for (let i = 0; i < subTactics.length; i++) {
               try {
                 const stateR = await retryDocumentNotReady(() =>
                   lspClient.sendRequest<RunResult<number>>('petanque/get_state_at_pos', {
                     uri: doc.uri,
-                    position: insPos,
+                    position: queryPos,
                     opts: { memo: false },
                   })
                 );
@@ -1419,21 +1425,31 @@ async function main() {
                   opts: { memo: false },
                 });
               } catch (e: any) {
+                const msg = e?.message || String(e);
+                // If we can't query the state (not in proof mode), fall through
+                // to the regular spec check instead of rejecting.
+                if (msg.includes('illegal begin of vernac') ||
+                    msg.includes('No proof-editing in progress') ||
+                    msg.includes('proof-editing')) {
+                  subTactics = null;
+                  break;
+                }
                 failedAt = i;
-                failedError = e?.message || String(e);
+                failedError = msg;
                 break;
               }
             }
             if (failedAt >= 0) {
               if (failedAt === 0) {
                 // First sub-tactic failed — reject entirely
+                const st = subTactics!;
                 return reply(
-                  `${fileLine(file, proofLine)} — spec check FAILED on sub-tactic 1: \"${subTactics[0]}\"\n  Coq says: ${failedError}`,
+                  `${fileLine(file, proofLine)} — spec check FAILED on sub-tactic 1: \"${st[0]}\"\n  Coq says: ${failedError}`,
                   { applied: false, error: failedError, sub_tactic: 1 }
                 );
               }
               // Insert successful sub-tactics, leave the rest
-              tactic = subTactics.slice(0, failedAt).join(' ');
+              tactic = subTactics!.slice(0, failedAt).join(' ');
             }
           }
           if (!fromAdmitReplacement) {
