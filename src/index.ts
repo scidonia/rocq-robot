@@ -1398,6 +1398,7 @@ async function main() {
 
           // Multi-tactic one-liner: validate each .-separated sub-tactic independently.
           // If the nth fails, insert only the first n-1 (successful) sub-tactics.
+          // Skip for ;-chains — proper parsing needs a full Ltac parser.
           let subTactics: string[] | null = null;
           let failedAt: number = -1;
           let failedError: string = '';
