@@ -724,17 +724,33 @@ async function main() {
         {
           name: 'delete_lemma',
           description:
-            'Delete a lemma stub (Lemma name : statement. Proof. Admitted.) ' +
-            'above a specified proof. Use "before" to name which proof it goes above. ' +
-            'Cursor moves to the new proof.',
+            'Delete named lemmas/theorems and their proofs from a .v file. ' +
+            'Accepts a single name or array. Forces LSP re-sync after deletion.',
           inputSchema: {
             type: 'object',
             properties: {
               file: { type: 'string', description: 'Path to a .v file' },
-              name: { type: 'string', description: 'Lemma name (e.g. "my_helper")' },
-              before: { type: 'string', description: 'Proof name to insert above (e.g. "preservation")' },
+              name: {
+                description: 'Lemma/theorem name or array of names',
+                anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+              },
             },
-            required: ['file', 'name', 'statement'],
+            required: ['file', 'name'],
+          },
+        },
+        {
+          name: 'delete_step',
+          description:
+            'Remove the last tactic line from the active proof. ' +
+            'Does NOT rely on undo history — finds and removes the last tactic directly.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file: { type: 'string', description: 'Path to a .v file' },
+              name: { type: 'string', description: 'Proof name (e.g. "preservation")' },
+              count: { type: 'number', description: 'Number of tactic lines to remove (default: 1)' },
+            },
+            required: ['file', 'name'],
           },
         },
       ],
@@ -2379,6 +2395,61 @@ async function main() {
           return reply(
             `${fileLine(file, 0)} — deleted ${namesStr}`,
             { applied: true, deleted: totalDeleted, names }
+          );
+        }
+
+        case 'delete_step': {
+          const { file, name, count } = args as {
+            file: string;
+            name: string;
+            count?: number;
+          };
+
+          const n = count ?? 1;
+          const doc = await ensureDocumentOpened(file);
+          const docLines = doc.text.split('\n');
+          const proofLine = findProofLine(docLines, name);
+          if (proofLine < 0) throw new Error(`Proof not found: "${name}"`);
+
+          // Find the last N tactic lines before Admitted/Qed
+          let admitLine = -1;
+          for (let i = proofLine + 1; i < docLines.length; i++) {
+            if (docLines[i].trim() === 'Admitted.' || docLines[i].trim() === 'Qed.') {
+              admitLine = i; break;
+            }
+          }
+          if (admitLine < 0) throw new Error('No Admitted./Qed. found');
+
+          // Collect the last N non-blank, non-Proof lines
+          const toRemove: number[] = [];
+          let scanning = admitLine - 1;
+          while (toRemove.length < n && scanning > proofLine) {
+            const l = docLines[scanning].trim();
+            if (l !== '' && l !== 'Proof.' && !l.startsWith('(*')) {
+              toRemove.unshift(scanning);
+            }
+            scanning--;
+          }
+
+          if (toRemove.length === 0) throw new Error('No tactics to delete');
+
+          pushFileHistory(file, doc.text, currentProof.get(file));
+
+          let currentText = doc.text;
+          // Remove from last to first to preserve indices
+          for (let i = toRemove.length - 1; i >= 0; i--) {
+            currentText = docManager.applyEdits(currentText, [{
+              range: { start: { line: toRemove[i], character: 0 }, end: { line: toRemove[i] + 1, character: 0 } },
+              newText: '',
+            }]);
+          }
+
+          await docManager.updateDocument(file, currentText);
+          await docManager.saveDocument(file);
+
+          return reply(
+            `${fileLine(file, 0)} — removed ${toRemove.length} tactic(s) from proof "${name}"`,
+            { applied: true, removed: toRemove.length }
           );
         }
 
