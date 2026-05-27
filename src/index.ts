@@ -1419,6 +1419,12 @@ async function main() {
             await docManager.updateDocument(file, replaced);
             await docManager.saveDocument(file);
 
+            // Force LSP re-sync before querying goals
+            try {
+              await docManager.closeDocument(file);
+              await ensureDocumentOpened(file);
+            } catch {}
+
             // Query goals to check if tactic closed the bullet; seal if not
             let sealMsg = '';
             try {
