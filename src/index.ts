@@ -1368,8 +1368,12 @@ async function main() {
           let fromAdmitReplacement = false;
           const admitPos = lastAdmitReplaced.get(file);
           if (admitPos !== undefined) {
-            // replace_admit set this — insert at the reopened bullet position
-            insPos = { line: admitPos, character: 0 };
+            // replace_admit set this — insert AFTER the bullet prefix on the reopened line
+            const admitLine = docLines[admitPos] || '';
+            const bulletMatch = admitLine.match(/^\s*[-+*]+\s/);
+            insPos = bulletMatch
+              ? { line: admitPos, character: bulletMatch[0].length }
+              : { line: admitPos, character: 0 };
             fromAdmitReplacement = true;
             lastAdmitReplaced.delete(file);
           } else {
