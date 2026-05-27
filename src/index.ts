@@ -1659,7 +1659,6 @@ async function main() {
                 }
               }
               if (admittedLine >= 0) {
-                pushFileHistory(file, currentDoc.text, currentProof.get(file));
                 const replaceEdit = {
                   range: {
                     start: { line: admittedLine, character: 0 },
