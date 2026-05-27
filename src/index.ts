@@ -1178,7 +1178,11 @@ async function main() {
           try {
             await docManager.closeDocument(file);
             await ensureDocumentOpened(file);
-          } catch { /* best-effort re-sync */ }
+            // Wait for coq-lsp to finish re-checking the reopened document
+            await sleep(300);
+          } catch (e) {
+            console.error('[edit_file] re-sync failed:', e);
+          }
 
           const updatedDoc = docManager.getDocument(file)!;
 
