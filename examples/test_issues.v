@@ -249,8 +249,6 @@ Lemma test_multi : True.
 Proof.
 apply I. exact I.
 Qed.
-
-
 Theorem preservation : forall t mu t' mu' T S,
   has_type [] S t T -> step t mu t' mu' ->
   heap_ok mu S ->
