@@ -16,8 +16,9 @@
 - **Proposed:** Warn when tactic contains >3 `.` separators; suggest splitting into multiple `insert_tactic` calls.
 
 ### Undo removes wrong operation in multi-insert bullets
-- **Problem:** A bullet with two `insert_tactic` calls (e.g., `intros/inversion` on one line, `destruct/exists` on next). `undo_step(1)` removes the first line, leaving the second as an orphan referencing names that no longer exist.
-- **Proposed:** Undo should remove the LAST insert, not the first. Or track insert order per bullet.
+- **Problem:** A bullet with two `insert_tactic` calls (e.g., `intros/inversion` on one line, `destruct/exists` on next). With `replace:true`, `undo_step(1)` restores to an intermediate state (old tactic deleted, new not inserted).
+- **Root cause:** `insert_tactic replace:true` pushed history twice — once when deleting old tactic, once when inserting new. `undo_step(1)` only pops one, landing at the intermediate state.
+- **Fix:** Flag `historyAlreadyPushed` — skip the second `pushFileHistory` when replace already pushed. Commit `TBD`.
 
 ## Backlog — Medium Priority
 
@@ -29,7 +30,9 @@
 - **Problem:** 8+ cases share `intros; inversion; exists S; split; extends_refl; split; Hok; constructor`. Each requires separate `insert_tactic`. Coq supports `all: try (...)` but the tool doesn't help compose or apply bulk tactics.
 - **Proposed:** A `batch_tactic` command that applies the same tactic to all remaining background goals at the same stack level.
 
-### LLM admits mid-proof with no recovery path
+### LSP/coqc bullet disagreement in `has_type_weaken`
+- **Problem:** `has_type_weaken` reports Qed in LSP (`check_file`), but coqc rejects with "No such goal. Focus next goal with bullet -." The `;` chaining with bracket dispatch in multi-premise cases (T_If, T_App, T_Assign) passes LSP validation but fails batch compilation.
+- **Impact:** False confidence — `insert_tactic` shows the proof as complete, but `coqc` says otherwise.
 - **Problem:** The LLM (or user) uses `admit.` on hard cases. These become "given-up" in the proof state. After the Qed/admitted line, you can't navigate back to fix them. The only option is to manually locate `admit` lines and replace them.
 - **Proposed:** `focus_proof` should list given-up goals. `reset_proof` on a subgoal should be possible without wiping the entire proof.
 

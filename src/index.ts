@@ -1305,10 +1305,12 @@ async function main() {
           let doc = docManager.getDocument(file)!;
 
           // If replacing, delete the last inserted tactic text from the file first
+          let historyAlreadyPushed = false;
           if (replace) {
             const last = lastInsertion.get(file);
             if (last) {
               pushFileHistory(file, doc.text, currentProof.get(file));
+              historyAlreadyPushed = true;
               const cleanedText = docManager.applyEdits(doc.text, [{
                 range: last.range,
                 newText: '',
@@ -1564,7 +1566,9 @@ async function main() {
               ? (insPos.character || 0) + contentLines[0].length
               : contentLines[lastIdx].length,
           };
-          pushFileHistory(file, doc.text, currentProof.get(file));
+          if (!historyAlreadyPushed) {
+            pushFileHistory(file, doc.text, currentProof.get(file));
+          }
           const preEditVersion = doc.version;
           const preEditText = doc.text;
 
