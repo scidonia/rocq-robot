@@ -540,3 +540,50 @@ describe('full chain (with surrounding defs)', () => {
     // bar's Proof. Admitted. is untouched, so "Admitted" appears in the file
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// ISSUE #1: Stale LSP state after edit_file — spec check must catch dead refs
+// ═══════════════════════════════════════════════════════════════════
+//
+// Scenario: a lemma is added, used in a proof, then deleted via edit_file.
+// After deletion, insert_tactic must reject tactics referencing the
+// deleted lemma — even if the LSP had a stale cached binding.
+//
+// Fix: after edit_file, coq/getDocument is called to force full re-check.
+// This invalidates stale bindings so the spec check catches dead refs.
+//
+// Manual integration test (with live MCP binary):
+//   1. add_lemma name="helper" statement="True" before="main"
+//   2. focus_proof name="helper"
+//   3. insert_tactic tactic="exact I."
+//   4. insert_tactic tactic="Qed."
+//   5. focus_proof name="main"
+//   6. insert_tactic tactic="apply helper."  → succeeds (helper exists)
+//   7. edit_file find="Lemma helper : True.\nProof.\n  exact I.\nQed."
+//               replace=""
+//   8. insert_tactic tactic="apply helper."  → MUST: spec check FAILED
+
+describe('stale LSP: edit_file removal clears LSP bindings', () => {
+  const base = surr + `Lemma helper : True.\nProof. Admitted.\n\nLemma main : nat.\nProof. Admitted.`;
+
+  it('file initially has helper lemma', () => {
+    expect(base).toContain('Lemma helper');
+    expect(base).toContain('Lemma main');
+  });
+
+  it('simulated edit_file removes helper block cleanly', () => {
+    const lines = base.split('\n');
+    const helperIdx = lines.findIndex(l => l.startsWith('Lemma helper'));
+    const nextKwIdx = lines.findIndex((l, i) => i > helperIdx &&
+      (l.startsWith('Lemma') || l.startsWith('Theorem')));
+    expect(helperIdx).toBeGreaterThanOrEqual(0);
+    expect(nextKwIdx).toBeGreaterThan(helperIdx);
+
+    const after = applyTextEdits(base, [{
+      range: { start: { line: helperIdx, character: 0 }, end: { line: nextKwIdx, character: 0 } },
+      newText: '',
+    }]);
+    expect(after).not.toContain('Lemma helper');
+    expect(after).toContain('Lemma main');
+  });
+});

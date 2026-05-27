@@ -1177,11 +1177,9 @@ async function main() {
           try {
             const updatedDoc = docManager.getDocument(file)!;
             await retryDocumentNotReady(() =>
-              lspClient.sendRequest('proof/goals', {
+              lspClient.sendRequest<{ spans: Array<{ range: Range }>; completed: { status: string } }>('coq/getDocument', {
                 textDocument: { uri: updatedDoc.uri, version: updatedDoc.version },
-                position: { line: 0, character: 0 },
-                pp_format: 'Str',
-                mode: 'After',
+                ast: false,
               })
             );
           } catch { /* best-effort re-sync */ }
