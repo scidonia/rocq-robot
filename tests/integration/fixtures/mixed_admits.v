@@ -1,4 +1,4 @@
-Require Import Arith.
+From Stdlib Require Import Arith.
 
 (** Fixture for mixed-goal admit_hash tests.
     Uses only Prop goals (petanque cannot query Set/Type goals).

@@ -435,9 +435,10 @@ describe('search / inspect / locate / require', () => {
   });
 
   it('search_lemmas with type pattern finds nat addition identity', async () => {
-    const r = await h.callTool('search_lemmas', { file: BASIC, pattern: '_ + 0 = _' });
+    // Use Rocq 9 metavariable syntax (?n) for type pattern search
+    const r = await h.callTool('search_lemmas', { file: BASIC, pattern: '(?n + 0 = ?n)' });
     expect(r.isError).toBe(false);
-    expect(r.text).toMatch(/plus_n_O|add_0_r/);
+    expect(r.text).toMatch(/add_0_r/);
   });
 
   it('inspect_term returns Set/Type for nat', async () => {
@@ -459,7 +460,8 @@ describe('search / inspect / locate / require', () => {
   });
 
   it('require_lib imports Lia successfully', async () => {
-    const r = await h.callTool('require_lib', { file: BASIC, lib: 'Lia' });
+    // Rocq 9.1 stdlib is under Stdlib.* namespace
+    const r = await h.callTool('require_lib', { file: BASIC, lib: 'Stdlib.micromega.Lia' });
     expect(r.isError).toBe(false);
     expect(r.text).toMatch(/Lia|import/i);
   });

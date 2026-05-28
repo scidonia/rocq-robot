@@ -1,4 +1,4 @@
-Require Import Arith List.
+From Stdlib Require Import Arith List Lia.
 Import ListNotations.
 
 (** Basic fixture for integration tests *)
