@@ -2296,12 +2296,26 @@ async function main() {
             if (!bounds) return null;
             const admitLines = findAdmitLines(docLines, bounds.proofLine, bounds.endLine);
             for (const admitLine of admitLines) {
+              // Snap just before 'admit' on the line so we get the pre-admit goal state.
+              const lineText = docLines[admitLine] || '';
+              const admitIdx = lineText.search(/\badmit\b/);
+              const character = admitIdx > 0 ? admitIdx - 1 : 0;
+              let admitState: RunResult<number>;
               try {
-                // Snap just before 'admit' on the line so we get the pre-admit goal state.
-                const lineText = docLines[admitLine] || '';
-                const admitIdx = lineText.search(/\badmit\b/);
-                const character = admitIdx > 0 ? admitIdx - 1 : 0;
-                const admitState = await getStateAt({ line: admitLine, character });
+                admitState = await getStateAt({ line: admitLine, character });
+              } catch { continue; /* position not in proof mode, try next */ }
+
+              // Check this state has an active goal
+              let preGoals: GoalConfig<string>;
+              try {
+                preGoals = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
+                  st: admitState.st, opts: { compact: compact ?? true },
+                });
+              } catch { continue; }
+              if (!preGoals?.goals?.length) continue;
+
+              // Now run the tactic speculatively — return result whether it succeeds or fails
+              try {
                 const r = await tryRunTactic(admitState.st);
                 return reply(
                   `"${t}" at ${fileLine(file, admitLine)} → ${r.goalsResult.goals?.length ?? 0} goal(s)` +
@@ -2309,7 +2323,14 @@ async function main() {
                   (r.goalsResult.goals?.length ? '\n' + formatGoals(r.goalsResult) : ''),
                   { state_id: r.runResult.st, proof_finished: r.runResult.proof_finished, goals: r.goalsResult, feedback: r.runResult.feedback }
                 );
-              } catch { /* try next admit line */ }
+              } catch (tacErr: any) {
+                // Tactic failed — return the error with the goal context so the user can see what they're working with
+                const goalText = formatGoals(preGoals);
+                return reply(
+                  `"${t}" at ${fileLine(file, admitLine)} → tactic failed: ${tacErr.message}\n${goalText}`,
+                  { state_id: admitState.st, proof_finished: false, goals: preGoals, feedback: [] }
+                );
+              }
             }
             return null;
           };
