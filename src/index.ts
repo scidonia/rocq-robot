@@ -2288,6 +2288,50 @@ async function main() {
           // Try at user's position (Prev mode)
           const stateResult = await getStateAt(position);
           let result: { runResult: RunResult<number>; goalsResult: GoalConfig<string> };
+
+          // If the proof has given-up (admit) lines, snap state at each one and
+          // try running the tactic there — this lets try_step work against given-up bullets.
+          const tryAgainstAdmitLines = async () => {
+            const bounds = proofBounds(docLines, name);
+            if (!bounds) return null;
+            const admitLines = findAdmitLines(docLines, bounds.proofLine, bounds.endLine);
+            for (const admitLine of admitLines) {
+              try {
+                // Snap just before 'admit' on the line so we get the pre-admit goal state.
+                const lineText = docLines[admitLine] || '';
+                const admitIdx = lineText.search(/\badmit\b/);
+                const character = admitIdx > 0 ? admitIdx - 1 : 0;
+                const admitState = await getStateAt({ line: admitLine, character });
+                const r = await tryRunTactic(admitState.st);
+                return reply(
+                  `"${t}" at ${fileLine(file, admitLine)} → ${r.goalsResult.goals?.length ?? 0} goal(s)` +
+                  (r.runResult.proof_finished ? ' (proof finished!)' : '') +
+                  (r.goalsResult.goals?.length ? '\n' + formatGoals(r.goalsResult) : ''),
+                  { state_id: r.runResult.st, proof_finished: r.runResult.proof_finished, goals: r.goalsResult, feedback: r.runResult.feedback }
+                );
+              } catch { /* try next admit line */ }
+            }
+            return null;
+          };
+
+          // Check if cursor has active goals; if not, fall back to admit lines.
+          let initialGoals: GoalConfig<string> | null = null;
+          try {
+            initialGoals = await retryDocumentNotReady(() =>
+              lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
+                st: stateResult.st, opts: { compact: compact ?? true },
+              })
+            );
+          } catch { /* state may be outside proof mode — handled below */ }
+
+          const hasActiveGoals = (initialGoals?.goals?.length ?? 0) > 0;
+          const hasGivenUp    = (initialGoals?.given_up?.length ?? 0) > 0;
+
+          if (!hasActiveGoals && (hasGivenUp || !initialGoals)) {
+            const r = await tryAgainstAdmitLines();
+            if (r) return r;
+          }
+
           try {
             result = await tryRunTactic(stateResult.st);
           } catch (e: any) {
@@ -2313,6 +2357,9 @@ async function main() {
                   const prevState = await getStateAt(prevPos);
                   result = await tryRunTactic(prevState.st);
                 } catch {
+                  // Also try admit lines as a last resort
+                  const r = await tryAgainstAdmitLines();
+                  if (r) return r;
                   throw e;
                 }
               } else {
@@ -2320,7 +2367,11 @@ async function main() {
                 const spansAfter = allSpans.filter(
                   s => s.range.start.line > position.line || (s.range.start.line === position.line && s.range.start.character > position.character)
                 ).sort((a, b) => a.range.start.line - b.range.start.line || a.range.start.character - b.range.start.character);
-                if (spansAfter.length === 0) throw e;
+                if (spansAfter.length === 0) {
+                  const r = await tryAgainstAdmitLines();
+                  if (r) return r;
+                  throw e;
+                }
                 const innerState = await getStateAt(spansAfter[0].range.start);
                 result = await tryRunTactic(innerState.st);
               }

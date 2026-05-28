@@ -159,7 +159,11 @@ export function findAdmitLines(lines: string[], proofLine: number, endLine: numb
   const admitted: number[] = [];
   for (let i = proofLine + 1; i < endLine; i++) {
     const t = lines[i].trim();
-    if (t === 'admit.' || t.endsWith(' admit.')) {
+    // Match standalone `admit.` bullets and also `admit` used as a tactic
+    // inside bracket expressions (e.g. `[exact Hok | admit]`).
+    // Exclude `Admitted.` (the proof-closing command).
+    if (t === 'Admitted.' || t === 'Qed.' || t === 'Defined.') continue;
+    if (t === 'admit.' || t.endsWith(' admit.') || /\badmit\b/.test(t)) {
       admitted.push(i);
     }
   }
