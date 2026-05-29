@@ -320,7 +320,7 @@ async function main() {
   // Load skill guide content at startup
   const skillGuideUri = 'coq://skill-guide';
   const skillGuideContent = fs.readFileSync(
-    resolvePath(__dirname, '../SKILL.md'), 'utf-8'
+    resolvePath(__dirname, '../src/skill.md'), 'utf-8'
   );
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({
