@@ -130,141 +130,74 @@ The LLM can:
 
 **LSP Feature**: All tools return structured error information
 
-## Concrete Example: LLM Proving a Theorem
+## The Hash-Driven Workflow
 
-**Goal**: Prove `forall n, n + 0 = n` in Rocq
-
-**Without LSP (traditional)**:
-```coq
-(* Human manually writes: *)
-Lemma add_zero_r : forall n, n + 0 = n.
-Proof.
-  induction n.
-  - reflexivity.
-  - simpl. rewrite IHn. reflexivity.
-Qed.
-```
-
-**With LSP (neurosymbolic)**:
+rocq-piler uses a **content-addressed admit system**: every open goal in a proof has a unique hash computed from its goal text. This turns proof construction into a clean cycle:
 
 ```
-1. LLM: "Let me check the goal"
-   → coq_open_goals(file="Add.v", line=13)
-   ← Goal: "forall n : nat, n + 0 = n"
-
-2. LLM: "I need to prove a universal quantifier, I'll introduce the variable"
-   → coq_insert_tactic(tactic="induction n.")
-   ← Success! New goals:
-      • Goal 1: "0 + 0 = 0"
-      • Goal 2: "S n + 0 = S n" (with IH: "n + 0 = n")
-
-3. LLM: "First goal is trivial by reflexivity"
-   → coq_insert_tactic(tactic="- reflexivity.")
-   ← Success! Goal 1 complete. Now on Goal 2.
-
-4. LLM: "Let me simplify and use the induction hypothesis"
-   → coq_insert_tactic(tactic="- simpl. rewrite IHn. reflexivity.")
-   ← Success! Proof complete. QED.
+focus_proof → get hashes → insert_tactic(admit_hash=X) → repeat until Qed
 ```
 
-**Key neurosymbolic elements**:
-- LLM uses **pattern recognition** (recognizes ∀ needs intro, S needs induction)
-- Rocq provides **verification** (each tactic is type-checked)
-- LSP provides **interaction protocol** (query → propose → verify → iterate)
-
-## Architecture: This Project
-
-This MCP (Model Context Protocol) server implements the LSP bridge:
+### Example: Proving `(True /\ True) /\ True` in 3 calls
 
 ```
-┌──────────────────────────────────────┐
-│  OpenCode / LLM Agent                │
-│  (Claude, GPT-4, etc.)               │
-└─────────────┬────────────────────────┘
-              │ MCP Protocol
-              │ (tool calls)
-┌─────────────▼────────────────────────┐
-│  rocq-piler                          │
-│  • Exposes 20+ MCP tools             │
-│  • Manages document state            │
-│  • Handles LSP ↔ MCP translation     │
-└─────────────┬────────────────────────┘
-              │ JSON-RPC (LSP + Pétanque)
-              │ (stdio)
-┌─────────────▼────────────────────────┐
-│  rocq-lsp                            │
-│  • Type-checks Rocq files            │
-│  • Tracks proof state                │
-│  • Executes tactics                  │
-└─────────────┬────────────────────────┘
-              │ OCaml API
-              │
-┌─────────────▼────────────────────────┐
-│  Rocq Kernel                         │
-│  • Formal verification engine        │
-│  • Proof checker                     │
-│  • Type theory implementation        │
-└──────────────────────────────────────┘
+1. focus_proof(file="Thm.v", name="deep_conj")
+   ← 1 admit: abc123  L7: (True / True) / True
+
+2. insert_tactic(admit_hash="abc123", tactic="split.\n- admit.\n- admit.")
+   ← 2 admits remaining:
+      def456  L8: True / True   (hyps: empty, goal: True / True)
+      ghi789  L9: True           (hyps: empty, goal: True)
+
+3. insert_tactic(admit_hash="def456", tactic="split; exact I.")
+   insert_tactic(admit_hash="ghi789", tactic="exact I.")
+   ← Qed applied
 ```
 
-### MCP Tools for Neurosymbolic Rocq
+**Why hashes?** Every admit with the same goal text shares the same hash. Close four `True` admits at once — across any bullet depth — in a single call. The LLM reads hashes from `focus_proof`, writes tactics for them, and counts down to `Qed`.
 
-#### Core Proof Interaction Tools
+### Example: Dependent Type Progress Theorem in 9 calls
 
-| Tool | Neural Use Case | Symbolic Capability |
-|------|----------------|---------------------|
-| `coq_focus` | "Let me work on this proof" | Sets cursor to proof, returns full proof tree with goals & bullet stack |
-| `coq_open_goals` | "What do I need to prove?" | Returns current goals & hypotheses at a proof position |
-| `coq_insert_tactic` | "Try this tactic and show results" | Inserts tactic, auto-handles bullets, returns updated goals |
-| `coq_try_tactic` | "Will this tactic work?" | Speculatively executes tactic without modifying file |
-| `coq_undo` | "Roll back the last proof steps" | Removes the last N edit operations |
-| `coq_reset_proof` | "Start this proof over" | Wipes proof body, replaces with fresh Admitted |
+See `examples/dep_vec.v` for a full dependently-typed language (Nat + Vec n) with both preservation and progress theorems proved entirely via hash-driven MCP calls:
 
-#### Proof Navigation & Structure
+```
+1. focus_proof → hash for the theorem goal
+2. insert_tactic(admit_hash=X, tactic="{induction + 7 stubs}") → 7 case hashes with hyps+goal inline
+3-9. insert_tactic(admit_hash=<case>, tactic="...") × 7 → Qed
+```
 
-| Tool | Neural Use Case | Symbolic Capability |
-|------|----------------|---------------------|
-| `coq_add_lemma` | "I need a helper lemma" | Inserts lemma stub above specified proof |
-| `coq_proof_state` | "What proof am I working on?" | Returns proof name, statements & rich context |
+Each response shows **hypotheses + goal** per admit, so the LLM writes each case's tactic without extra `focus_proof` calls.
 
-#### Knowledge & Search Tools
+### MCP Tools
 
-| Tool | Neural Use Case | Symbolic Capability |
-|------|----------------|---------------------|
-| `coq_search` | "What lemmas are relevant?" | Runs speculative `Search` query |
-| `coq_check_term` | "What type does this have?" | Runs speculative `Check` command |
-| `coq_about` | "Tell me about this definition" | Runs speculative `About` command |
-| `coq_locate` | "Where is this defined?" | Runs speculative `Locate` to find definitions |
-| `coq_require` | "Import this library" | Speculatively imports library for subsequent queries |
-
-#### Low-Level State Management (Pétanque API)
-
-| Tool | Neural Use Case | Symbolic Capability |
-|------|----------------|---------------------|
-| `coq_get_state_at_pos` | "Save this proof state" | Returns opaque state ID at position |
-| `coq_run_tactic` | "Execute against this state" | Runs tactic against state ID, returns new state |
-| `coq_goals_for_state` | "Show goals for this state" | Returns goals for a state ID |
-
-#### File Operations
-
-| Tool | Neural Use Case | Symbolic Capability |
-|------|----------------|---------------------|
-| `coq_apply_edit` | "Update specific text ranges" | Applies LSP-style text edits & re-syncs |
-| `coq_check` | "Is the whole file valid?" | Forces full document checking |
-| `coq_check_range` | "What's wrong in this region?" | Returns diagnostics for specific line range |
+| Tool | Description |
+|------|-------------|
+| `focus_proof` | One-stop shop: proof state, script, all open admits with hashes + hyps + goals |
+| `insert_tactic` | Insert a tactic; pass `admit_hash` to target specific admits by hash; multi-line blocks supported |
+| `try_step` | Speculatively execute a tactic without modifying the file |
+| `open_goals` | Quick goal query with compact/Prev mode options |
+| `proof_state` | Full proof context including name, statements, goal state |
+| `undo_step` | Roll back the last N edit operations |
+| `reset_proof` | Wipe a proof body to fresh `Admitted.` |
+| `add_lemma` / `delete_lemma` | Insert/remove lemma stubs |
+| `delete_step` | Remove the last tactic line from a proof |
+| `edit_file` | Find-and-replace text edits with LSP re-sync |
+| `check_file` | Force full document checking |
+| `check_range` | Get diagnostics for a specific line range |
+| `search_lemmas` / `inspect_term` / `inspect_about` / `locate_term` / `require_lib` | Knowledge & search |
+| `snap_state` / `exec_tactic` / `state_goals` | Low-level Pétanque API |
 
 ### Current Server Capabilities
 
-- **Dynamic workspace switching**: opening a file from another Rocq project restarts `rocq-lsp` under the correct project root
-- **Project-root detection**: walks upward looking for `_CoqProject`, `_RocqProject`, or `dune-project`
-- **Readable goal output**: goal responses are formatted for MCP clients with hypotheses first and goal rendered compactly
-- **Automatic bullet management**: `coq_insert_tactic` auto-prepends bullet prefixes (-, +, *) when the proof state requires them
-- **Speculative execution**: both low-level Pétanque state APIs and higher-level single-call helpers (`coq_try_tactic`)
-- **Proof navigation**: `coq_focus` returns complete proof tree including bullet stack depth and proof script
-- **Helper lemma insertion**: `coq_add_lemma` inserts lemma stubs at the correct position in the file
-- **Safe undo/reset**: `coq_undo` tracks edit operations (not just tactics), `coq_reset_proof` wipes proof to Admitted
-- **Library management**: `coq_require` speculatively imports libraries for use in queries without modifying the file
-- **Lifecycle hardening**: the LSP client waits for readiness, guards overlapping restarts, and retries transient states
+- **Content-addressed admits**: every open goal gets a hash — same goal text = same hash, close all matching admits at once across any bullet depth
+- **Hypotheses + goal per admit**: `focus_proof` and `insert_tactic` responses include full hypothesis context for each open admit
+- **Multi-line stub insertion**: open a proof, insert N bulleted admits, and get N hashes back — all in one `insert_tactic` call
+- **Re-seal with multi-goal expansion**: when a tactic produces N > 1 goals, they are optionally expanded to N individually addressable bulleted admits
+- **Auto-Qed**: proof automatically closed when all tactic admits and focused goals are eliminated; guarded against premature firing when background goals remain
+- **Dynamic workspace switching**: automates restarting `rocq-lsp` under different project roots
+- **Speculative execution**: try tactics safely via `try_step` or Pétanque state APIs before committing
+- **Bullet-aware proof navigation**: `focus_proof` reports bullet stack depth, given-up counts, and sibling context
+- **Safe undo/reset**: tracks edit operations, supports multi-step undo
 
 ## Benefits of This Approach
 
@@ -351,40 +284,27 @@ OpenCode: [Iteratively builds the proof using LSP feedback]
 OpenCode: "Proof complete! Here's what I did..."
 ```
 
-## Real Proof Example: Preservation Theorem
+## Real Proof Example: Dependent Type System
 
-The repository includes a complete, working example in `examples/test_issues.v` demonstrating:
+See `examples/dep_vec.v` for a complete, working example of a simple dependently-typed language:
 
-**Theorem**: Type preservation for PCF with references
-```coq
-Theorem preservation : forall t mu t' mu' T S,
-  has_type [] S t T -> step t mu t' mu' ->
-  heap_ok mu S ->
-  exists S', extends S' S /\ heap_ok mu' S' /\ has_type [] S' t' T.
-```
+**Language**: Nat + Vec n — base type Nat, dependent Vec n of length n  
+**Theorems proved via MCP tools**:
+- ✅ **Preservation** (7 cases): `has_type t T → step t t' → has_type t' T` — proved in 9 MCP calls  
+- ✅ **Progress** (7 cases): `has_type t T → value t ∨ ∃ t', step t t'` — proved in 9 MCP calls  
 
-**Proof completed using only MCP tools**:
-- ✅ 7 lemmas proved (extends_refl, nth_error_extends, weakening_store, substitution_preserves_typing_0, heap_lookup_type, heap_update_ok, **preservation**)
-- ✅ All 21 cases of the induction on step relation completed
-- ✅ Main preservation theorem fully closed with **Qed**
-- ✅ Proper use of: inversion, induction, weakening lemmas, store extension, heap invariants
+Both proofs use the same pattern: `focus_proof` → multi-line stub → case hashes with hyps+goal → close by hash one-by-one.
 
-The LLM successfully:
-1. Identified necessary helper lemmas (extends_refl, nth_error_extends, weakening_store, etc.)
-2. Proved each lemma using appropriate tactics
-3. Structured the main proof by induction on the step relation
-4. Handled complex cases (S_RefV with store extension, S_DerefLoc with heap lookup)
-5. Applied weakening lemmas where needed to adjust contexts
-6. Managed bullet-structured subgoals across 21 cases
-
-This demonstrates **neurosymbolic theorem proving in action**: the LLM proposes tactics guided by patterns, while Rocq verifies each step is logically sound.
+A larger PCF+References example is in `examples/test_issues.v`:
+- ✅ 7 helper lemmas + preservation theorem (21 cases)  
+- ✅ Full heap semantics with store extension and weakening  
+- ✅ All cases closed with `Qed`
 
 ## Additional Examples
 
-See `examples/example.v` for simpler examples including:
-- A finished proof (to query goals)
-- An incomplete proof (to practice tactics)
-- Test cases for each MCP tool
+- `examples/dep_vec.v` — Dependent type system (Nat + Vec n) with preservation and progress theorems, proved hash-driven
+- `examples/test_issues.v` — PCF + References (21-case preservation theorem)
+- `examples/example.v` — Simple examples for each MCP tool
 
 ## The Future of Neurosymbolic Programming
 
@@ -401,12 +321,12 @@ This LSP-based architecture represents a paradigm shift:
 
 ### What's Already Possible
 
-As demonstrated by the preservation theorem proof in this repository:
-- ✅ **LLM-driven theorem proving**: Complete non-trivial proofs (21 cases, multiple helper lemmas)
-- ✅ **Strategic proof planning**: Identifying needed lemmas and structuring induction proofs
-- ✅ **Interactive refinement**: Real-time tactic application with immediate verification feedback
-- ✅ **Error recovery**: Adjusting tactics based on Rocq's structured error messages
-- ✅ **Proof management**: Adding lemmas, resetting proofs, undoing operations
+As demonstrated by the proofs in this repository:
+- ✅ **Hash-driven proof construction**: `focus_proof` → get hashes → `insert_tactic(admit_hash=X)` → repeat until Qed
+- ✅ **Multi-case induction proofs**: 7 cases closed in 9 total MCP calls with full hypothesis context per case
+- ✅ **Multi-bullet depth**: same hash works across `-`/`+`/`*` bullet levels — close all matching admits in one call
+- ✅ **Dependent type progress + preservation**: Nat + Vec n language fully verified
+- ✅ **Interactive refinement**: speculative execution via `try_step` with immediate feedback
 
 ### What's Coming
 
@@ -440,6 +360,6 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Built with**: TypeScript, rocq-lsp, Model Context Protocol
+**Built with**: TypeScript, rocq-lsp, Model Context Protocol  
 
-**Enables**: LLMs + Rocq = Formally Verified AI-Assisted Programming
+**Design**: Content-addressed admits, hash-driven workflow, full hypothesis context per goal
