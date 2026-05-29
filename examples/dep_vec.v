@@ -113,12 +113,12 @@ Theorem preservation : forall t t' T,
   step t t' ->
   has_type t' T.
 Proof.
-  intros t t' T Hty Hstep. revert T Hty. induction Hstep.
-  - intros T Hty; inversion Hty; subst; apply T_Succ; apply IHHstep; assumption.
-  - intros T Hty; inversion Hty; subst; apply T_Cons; [apply IHHstep; assumption | assumption].
-  - intros T Hty; inversion Hty; subst; eapply T_Cons; [eassumption | apply IHHstep; eassumption].
-  - intros T Hty; inversion Hty; subst; eapply T_Head; apply IHHstep; eassumption.
-  - intros T Hty; inversion Hty; subst; eapply T_Tail; apply IHHstep; eassumption.
-  - intros T Hty; inversion Hty; subst; inversion H2; subst; assumption.
-  - intros T Hty; inversion Hty; subst; inversion H2; subst; assumption.
+intros t t' T Hty Hstep. revert T Hty. induction Hstep.
+- intros T Hty; inversion Hty; subst; apply T_Succ; apply IHHstep; assumption.
+- intros T Hty; inversion Hty; subst; apply T_Cons; [apply IHHstep; assumption | assumption].
+- intros T Hty; inversion Hty; subst; eapply T_Cons; [eassumption | apply IHHstep; eassumption].
+- intros T Hty; inversion Hty; subst; eapply T_Head; apply IHHstep; eassumption.
+- intros T Hty; inversion Hty; subst; eapply T_Tail; apply IHHstep; eassumption.
+- intros T Hty; inversion Hty; subst; inversion H2; subst; assumption.
+- intros T Hty; inversion Hty; subst; inversion H2; subst; assumption.
 Qed.
