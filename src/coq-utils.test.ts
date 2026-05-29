@@ -616,39 +616,64 @@ describe('proofBounds', () => {
 });
 
 describe('findAdmitLines', () => {
-  const body = [
-    'Theorem foo : nat.',
-    'Proof.',
-    '  induction n.',
-    '  - reflexivity.',
-    '  - admit.',
-    '  - reflexivity.',
-    '  - admit.',
-    'Admitted.',
-  ].join('\n');
-  const bounds = proofBounds(body.split('\n'), 'foo')!;
+  // Admitted. is ALWAYS included — it represents whatever focused goals sit
+  // right before it (unstarted proof: 1 goal; after induction: N goals; etc.)
 
-  it('finds both admit. tactic lines', () => {
-    const admits = findAdmitLines(body.split('\n'), bounds.proofLine, bounds.endLine);
-    expect(admits).toHaveLength(2);
-    const lines = body.split('\n');
-    expect(lines[admits[0]].trim()).toMatch(/admit\./);
-    expect(lines[admits[1]].trim()).toMatch(/admit\./);
+  it('unstarted proof — only Admitted. returned', () => {
+    const text = [
+      'Lemma foo : True.',
+      'Proof.',
+      'Admitted.',
+    ].join('\n');
+    const b = proofBounds(text.split('\n'), 'foo')!;
+    const admits = findAdmitLines(text.split('\n'), b.proofLine, b.endLine);
+    expect(admits).toHaveLength(1);
+    expect(text.split('\n')[admits[0]].trim()).toBe('Admitted.');
   });
 
-  it('excludes Admitted. (closing)', () => {
-    const admits = findAdmitLines(body.split('\n'), bounds.proofLine, bounds.endLine);
-    const lines = body.split('\n');
-    for (const a of admits) {
-      expect(lines[a].trim()).not.toBe('Admitted.');
-    }
-    expect(admits).toHaveLength(2);
+  it('proof with tactics but no tactic admits — Admitted. included', () => {
+    // e.g. after "induction n." with 7 focused goals, Admitted. is still the terminator
+    const text = [
+      'Lemma foo : True.',
+      'Proof.',
+      '  induction n.',
+      'Admitted.',
+    ].join('\n');
+    const b = proofBounds(text.split('\n'), 'foo')!;
+    const admits = findAdmitLines(text.split('\n'), b.proofLine, b.endLine);
+    expect(admits).toHaveLength(1);
+    expect(text.split('\n')[admits[0]].trim()).toBe('Admitted.');
   });
 
-  it('returns empty for clean proof', () => {
-    const clean = 'Theorem bar : nat.\nProof.\n  reflexivity.\nQed.';
-    const b = proofBounds(clean.split('\n'), 'bar');
-    expect(findAdmitLines(clean.split('\n'), b!.proofLine, b!.endLine)).toEqual([]);
+  it('proof with tactic admits — only tactic admits returned, NOT Admitted.', () => {
+    // Tactic-level admits cover all open goals; Admitted. is just the terminator.
+    const text = [
+      'Lemma foo : True /\\ True.',
+      'Proof.',
+      '  split.',
+      '  - admit.',
+      '  - admit.',
+      'Admitted.',
+    ].join('\n');
+    const b = proofBounds(text.split('\n'), 'foo')!;
+    const lines = text.split('\n');
+    const admits = findAdmitLines(lines, b.proofLine, b.endLine);
+    // Only the 2 tactic-level admits — Admitted. is excluded
+    expect(admits).toHaveLength(2);
+    expect(lines[admits[0]].trim()).toMatch(/- admit\./);
+    expect(lines[admits[1]].trim()).toMatch(/- admit\./);
+    expect(admits.every(l => lines[l].trim() !== 'Admitted.')).toBe(true);
+  });
+
+  it('closed proof (Qed.) — nothing returned', () => {
+    const text = [
+      'Lemma foo : True.',
+      'Proof.',
+      '  exact I.',
+      'Qed.',
+    ].join('\n');
+    const b = proofBounds(text.split('\n'), 'foo')!;
+    expect(findAdmitLines(text.split('\n'), b.proofLine, b.endLine)).toHaveLength(0);
   });
 });
 
@@ -724,11 +749,13 @@ describe('replaceAdmitLine: insert_tactic admit_hash replacement', () => {
   ].join('\n');
 
   it('replaces admit. with tactic, preserving bullet prefix', () => {
-    const admits = findAdmitLines(proof.split('\n'), 1, 5);
+    const lines = proof.split('\n');
+    const admits = findAdmitLines(lines, 1, 5);
+    // Only 1 tactic-level admit — Admitted. not included (tactic admits present)
     expect(admits).toHaveLength(1);
     const after = replaceAdmitLine(proof, admits[0], 'exact I.');
     expect(after).toContain('- exact I.');
-    expect(after).not.toContain('admit.');
+    expect(after).not.toContain('- admit.');
   });
 
   it('works for nested bullet prefixes', () => {
@@ -741,11 +768,13 @@ describe('replaceAdmitLine: insert_tactic admit_hash replacement', () => {
       '    * reflexivity.',
       'Admitted.',
     ].join('\n');
-    const admits = findAdmitLines(nested.split('\n'), 1, 6);
+    const lines = nested.split('\n');
+    const admits = findAdmitLines(lines, 1, 6);
+    // Only 1 tactic-level admit — Admitted. not included
     expect(admits).toHaveLength(1);
     const after = replaceAdmitLine(nested, admits[0], 'exact O.');
     expect(after).toContain('    * exact O.');
-    expect(after).not.toContain('admit.');
+    expect(after).not.toContain('* admit.');
   });
 });
 
@@ -923,10 +952,11 @@ describe('full admit workflow (deterministic)', () => {
     return text;
   })();
 
-  it('builds a 3-level proof with 3 admits', () => {
+  it('builds a 3-level proof with 3 tactic admits — Admitted. not included', () => {
     const bounds = proofBounds(built.split('\n'), 'foo');
     expect(bounds).not.toBeNull();
     const admits = findAdmitLines(built.split('\n'), bounds!.proofLine, bounds!.endLine);
+    // Only the 3 tactic-level admits
     expect(admits).toHaveLength(3);
   });
 

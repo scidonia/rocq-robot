@@ -171,7 +171,11 @@ export function findAdmitLines(lines: string[], proofLine: number, endLine: numb
       admitted.push(i);
     }
   }
-  // No tactic-level admits — treat Admitted. as the single root admit.
+  // Include Admitted. only when there are no tactic-level admits — it then
+  // represents all currently focused goals (unstarted proof, or after tactics
+  // that left goals open without using admit.).
+  // When tactic-level admits exist, they are the addressable goals; Admitted.
+  // is just the terminator and must not appear as a spurious extra entry.
   if (admitted.length === 0 && endLine >= 0 && lines[endLine]?.trim() === 'Admitted.') {
     admitted.push(endLine);
   }
