@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
-import { McpHarness, createHarness, fixture, tempFixture, removeTempFixture } from './harness.js';
+import { McpHarness, createHarness, fixture, tempFixture, removeTempFixture, extractAdmitHashes } from './harness.js';
 
 /** Count admit. tactic lines within a named proof in a file. */
 function countAdmitsInProof(file: string, proofName: string): number {
@@ -55,52 +55,44 @@ afterAll(async () => {
 
 describe('list_admitted on mixed goals', () => {
   it('returns 4 admits for mixed_four', async () => {
-    const r = await h.callTool('list_admitted', { file: MIXED, name: 'mixed_four' });
+    const r = await h.callTool('focus_proof', { file: MIXED, name: 'mixed_four' });
     expect(r.isError).toBe(false);
-    const { admitted } = r.allText[1] ? JSON.parse('{}') : (JSON.parse(JSON.stringify({})));
-    // Parse from the structured data field
-    expect(r.text).toMatch(/4 admit/);
+    expect(extractAdmitHashes(r.text)).toHaveLength(4);
   });
 
-  it('returns exactly 2 distinct hashes for mixed_four (True and nat)', async () => {
-    const r = await h.callTool('list_admitted', { file: MIXED, name: 'mixed_four' });
+  it('returns exactly 2 distinct hashes for mixed_four (True and True->True)', async () => {
+    const r = await h.callTool('focus_proof', { file: MIXED, name: 'mixed_four' });
     expect(r.isError).toBe(false);
-    // Lines with real hashes look like: "ccf47fa9  L11: True"
-    // Lines with errors look like: "error  L11: (could not query)"
-    const hashLines = r.text.split('\n').filter(l => /^[0-9a-f]{8}\s/.test(l));
-    expect(hashLines).toHaveLength(4);
-    const hashes = hashLines.map(l => l.slice(0, 8));
-    const unique = new Set(hashes);
-    expect(unique.size).toBe(2); // True hash ≠ nat hash
+    const admits = extractAdmitHashes(r.text);
+    expect(admits).toHaveLength(4);
+    const unique = new Set(admits.map(a => a.hash));
+    expect(unique.size).toBe(2);
   });
 
   it('True admits share one hash, (True->True) admits share another distinct hash', async () => {
-    const r = await h.callTool('list_admitted', { file: MIXED, name: 'mixed_four' });
-    const hashLines = r.text.split('\n').filter(l => /^[0-9a-f]{8}\s/.test(l));
-    // Goal text: "True" and "True -> True"
-    const trueLines   = hashLines.filter(l => /:\s+True$/.test(l));
-    const implLines   = hashLines.filter(l => l.includes('True -> True'));
-    expect(trueLines).toHaveLength(2);
-    expect(implLines).toHaveLength(2);
-    const trueHashes = new Set(trueLines.map(l => l.slice(0, 8)));
-    const implHashes = new Set(implLines.map(l => l.slice(0, 8)));
-    expect(trueHashes.size).toBe(1);
-    expect(implHashes.size).toBe(1);
-    expect([...trueHashes][0]).not.toBe([...implHashes][0]);
+    const r = await h.callTool('focus_proof', { file: MIXED, name: 'mixed_four' });
+    const admits = extractAdmitHashes(r.text);
+    const trueAdmits = admits.filter(a => a.goal === 'True');
+    const implAdmits = admits.filter(a => a.goal.includes('True -> True'));
+    expect(trueAdmits).toHaveLength(2);
+    expect(implAdmits).toHaveLength(2);
+    expect(new Set(trueAdmits.map(a => a.hash)).size).toBe(1);
+    expect(new Set(implAdmits.map(a => a.hash)).size).toBe(1);
+    expect(trueAdmits[0].hash).not.toBe(implAdmits[0].hash);
   });
 
   it('returns 3 admits for mixed_partial (first True already solved)', async () => {
-    const r = await h.callTool('list_admitted', { file: MIXED, name: 'mixed_partial' });
+    const r = await h.callTool('focus_proof', { file: MIXED, name: 'mixed_partial' });
     expect(r.isError).toBe(false);
-    expect(r.text).toMatch(/3 admit/);
+    expect(extractAdmitHashes(r.text)).toHaveLength(3);
   });
 
   it('all 4 admits share one hash for all_true', async () => {
-    const r = await h.callTool('list_admitted', { file: MIXED, name: 'all_true' });
+    const r = await h.callTool('focus_proof', { file: MIXED, name: 'all_true' });
     expect(r.isError).toBe(false);
-    const hashes = [...r.text.matchAll(/^([0-9a-f]{8})\s/mg)].map(m => m[1]);
-    expect(hashes).toHaveLength(4);
-    expect(new Set(hashes).size).toBe(1);
+    const admits = extractAdmitHashes(r.text);
+    expect(admits).toHaveLength(4);
+    expect(new Set(admits.map(a => a.hash)).size).toBe(1);
   });
 });
 
@@ -119,10 +111,10 @@ describe('insert_tactic admit_hash on mixed goals', () => {
     tmpFile = tempFixture('mixed_admits.v', 'mixed');
     await h.callTool('check_file', { file: tmpFile });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'mixed_four' });
-    const hashLines = list.text.split('\n').filter(l => /^[0-9a-f]{8}\s/.test(l));
-    trueHash = hashLines.find(l => /:\s+True$/.test(l))!.slice(0, 8);
-    implHash = hashLines.find(l => l.includes('True -> True'))!.slice(0, 8);
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'mixed_four' });
+    const admits = extractAdmitHashes(list.text);
+    trueHash = admits.find(a => a.goal === 'True')!.hash;
+    implHash = admits.find(a => a.goal.includes('True -> True'))!.hash;
   }, TIMEOUT);
 
   afterAll(() => removeTempFixture(tmpFile));
@@ -179,24 +171,20 @@ describe('insert_tactic admit_hash on mixed_partial', () => {
     tmpFile = tempFixture('mixed_admits.v', 'partial');
     await h.callTool('check_file', { file: tmpFile });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'mixed_partial' });
-    const hashLines = list.text.split('\n').filter(l => /^[0-9a-f]{8}\s/.test(l));
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'mixed_partial' });
+    const admits = extractAdmitHashes(list.text);
     // mixed_partial has: (True->True), True, (True->True)  — first True solved with exact I.
-    const trueLine = hashLines.find(l => /:\s+True$/.test(l));
-    const implLine = hashLines.find(l => l.includes('True -> True'));
-    trueHash = trueLine?.slice(0, 8) ?? '';
-    implHash = implLine?.slice(0, 8) ?? '';
+    trueHash = admits.find(a => a.goal === 'True')?.hash ?? '';
+    implHash = admits.find(a => a.goal.includes('True -> True'))?.hash ?? '';
   }, TIMEOUT);
 
   afterAll(() => removeTempFixture(tmpFile));
 
   it('has 3 admits: 1 True and 2 (True -> True)', async () => {
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'mixed_partial' });
-    const hashLines = list.text.split('\n').filter(l => /^[0-9a-f]{8}\s/.test(l));
-    const trueCount = hashLines.filter(l => /:\s+True$/.test(l)).length;
-    const implCount = hashLines.filter(l => l.includes('True -> True')).length;
-    expect(trueCount).toBe(1);
-    expect(implCount).toBe(2);
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'mixed_partial' });
+    const admits = extractAdmitHashes(list.text);
+    expect(admits.filter(a => a.goal === 'True')).toHaveLength(1);
+    expect(admits.filter(a => a.goal.includes('True -> True'))).toHaveLength(2);
   });
 
   it('replacing True hash closes exactly 1 admit', async () => {
@@ -239,9 +227,8 @@ describe('insert_tactic admit_hash on all_true', () => {
     tmpFile = tempFixture('mixed_admits.v', 'alltrue');
     await h.callTool('check_file', { file: tmpFile });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'all_true' });
-    const hashes = [...list.text.matchAll(/^([0-9a-f]{8})\s/mg)].map(m => m[1]);
-    trueHash = hashes[0]; // all same
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'all_true' });
+    trueHash = extractAdmitHashes(list.text)[0]?.hash; // all same hash
   }, TIMEOUT);
 
   afterAll(() => removeTempFixture(tmpFile));
@@ -288,9 +275,8 @@ describe('admit_hash error cases', () => {
     const tmpFile2 = tempFixture('mixed_admits.v', 'wrongtactic');
     await h.callTool('check_file', { file: tmpFile2 });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile2, name: 'mixed_four' });
-    const implLine = list.text.split('\n').find(l => /^[0-9a-f]{8}\s/.test(l) && l.includes('True -> True'));
-    const implHash2 = implLine?.slice(0, 8) ?? '';
+    const list = await h.callTool('focus_proof', { file: tmpFile2, name: 'mixed_four' });
+    const implHash2 = extractAdmitHashes(list.text).find(a => a.goal.includes('True -> True'))?.hash ?? '';
 
     // exact I. is wrong type for (True -> True) goal — should fail or not corrupt file
     const r = await h.callTool('insert_tactic', {

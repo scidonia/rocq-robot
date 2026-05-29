@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
-import { McpHarness, createHarness, fixture, tempFixture, removeTempFixture } from './harness.js';
+import { McpHarness, createHarness, fixture, tempFixture, removeTempFixture, extractAdmitHashes } from './harness.js';
 
 const TIMEOUT = 90_000;
 const BASIC = fixture('basic.v');
@@ -395,17 +395,16 @@ describe('list_admitted + insert_tactic admit_hash', () => {
 
   afterAll(() => removeTempFixture(tmpFile));
 
-  it('list_admitted returns hashes for each admit. line', async () => {
-    const r = await h.callTool('list_admitted', { file: tmpFile, name: 'has_admits' });
+  it('focus_proof returns hashes for each admit. line', async () => {
+    const r = await h.callTool('focus_proof', { file: tmpFile, name: 'has_admits' });
     expect(r.isError).toBe(false);
-    // Should list 2 admits with 8-char hex hashes
-    const hashes = [...r.text.matchAll(/[0-9a-f]{8}/g)].map(m => m[0]);
-    expect(hashes.length).toBeGreaterThanOrEqual(2);
+    const admits = extractAdmitHashes(r.text);
+    expect(admits.length).toBeGreaterThanOrEqual(2);
   });
 
   it('insert_tactic with admit_hash replaces the admit in-place', async () => {
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'has_admits' });
-    const hash = list.text.match(/[0-9a-f]{8}/)![0];
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'has_admits' });
+    const hash = extractAdmitHashes(list.text)[0]?.hash;
 
     const r = await h.callTool('insert_tactic', { file: tmpFile, name: 'has_admits', tactic: 'exact I.', admit_hash: hash });
     expect(r.isError).toBe(false);
@@ -506,9 +505,9 @@ describe('insert_tactic admit_hash re-seal', () => {
     const tmpFile = tempFixture('partial_bullet.v', 'seal1');
     await h.callTool('check_file', { file: tmpFile });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'partial_bullet' });
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'partial_bullet' });
     // Fixture: second bullet already closed, first bullet has "intros. admit."
-    const hash = list.text.match(/[0-9a-f]{8}/)![0];
+    const hash = extractAdmitHashes(list.text)[0]?.hash;
 
     // Replace only the admit. with the closing tactic
     const r = await h.callTool('insert_tactic', {
@@ -534,8 +533,8 @@ describe('insert_tactic admit_hash re-seal', () => {
     const tmpFile = tempFixture('nested_conj.v', 'split_seal');
     await h.callTool('check_file', { file: tmpFile });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'nested_conj' });
-    const firstHash = list.text.match(/[0-9a-f]{8}/)![0];
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'nested_conj' });
+    const firstHash = extractAdmitHashes(list.text)[0]?.hash;
 
     // bullet 1 goal is True /\ True. split. creates 2 subgoals — doesn't close.
     const r = await h.callTool('insert_tactic', {
@@ -545,12 +544,13 @@ describe('insert_tactic admit_hash re-seal', () => {
       admit_hash: firstHash,
     });
     expect(r.isError).toBe(false);
-    expect(r.text).toMatch(/sealed with admit/);
+    expect(r.text).toMatch(/sealed with/);
 
     const content = fs.readFileSync(tmpFile, 'utf8');
-    // First bullet: split. then re-sealed admit inside — second bullet intact
-    expect(content).toMatch(/- split\.\n\s+admit\./);
-    expect(content).toMatch(/\n  - admit\./); // second bullet still admitted
+    // First bullet: split. then 2 child admits (one per goal) — second bullet intact
+    expect(content).toMatch(/- split\./);
+    const admitCount = (content.match(/\badmit\./g) ?? []).length;
+    expect(admitCount).toBeGreaterThanOrEqual(2);
 
     removeTempFixture(tmpFile);
   }, TIMEOUT);
@@ -559,8 +559,8 @@ describe('insert_tactic admit_hash re-seal', () => {
     const tmpFile = tempFixture('partial_bullet.v', 'remaining1');
     await h.callTool('check_file', { file: tmpFile });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'partial_bullet' });
-    const hash = list.text.match(/[0-9a-f]{8}/)![0];
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'partial_bullet' });
+    const hash = extractAdmitHashes(list.text)[0]?.hash;
 
     // Close the only admit — proof should complete
     const r = await h.callTool('insert_tactic', {
@@ -581,8 +581,8 @@ describe('insert_tactic admit_hash re-seal', () => {
     const tmpFile = tempFixture('nested_conj.v', 'remaining2');
     await h.callTool('check_file', { file: tmpFile });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'nested_conj' });
-    const firstHash = list.text.match(/[0-9a-f]{8}/)![0];
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'nested_conj' });
+    const firstHash = extractAdmitHashes(list.text)[0]?.hash;
 
     // Replace bullet 1 admit with split. — non-closing, re-seals
     const r = await h.callTool('insert_tactic', {
@@ -592,14 +592,13 @@ describe('insert_tactic admit_hash re-seal', () => {
       admit_hash: firstHash,
     });
     expect(r.isError).toBe(false);
-    // 2 remaining: re-sealed admit in bullet 1, original admit in bullet 2
-    expect(r.text).toMatch(/2 admit\(s\) remaining/);
-    // Both have hashes
+    // split. on True /\ True → 2 child admits + original bullet 2 = 3 remaining
+    expect(r.text).toMatch(/3 admit\(s\) remaining/);
     const remainingHashes = [...r.text.matchAll(/([0-9a-f]{8})\s+L/g)].map(m => m[1]);
-    expect(remainingHashes.length).toBe(2);
+    expect(remainingHashes.length).toBe(3);
 
-    // Use the inline hash to close bullet 2 directly — no extra list_admitted needed
-    const secondHash = remainingHashes.find(h => h !== firstHash) ?? remainingHashes[1];
+    // Use the last inline hash (bullet 2 — distinct goal True /\ True) to close it
+    const secondHash = remainingHashes[remainingHashes.length - 1];
     const r2 = await h.callTool('insert_tactic', {
       file: tmpFile,
       name: 'nested_conj',
@@ -723,14 +722,14 @@ describe('deep_conj admit-split-close workflow', () => {
   //   3. close the two new sub-admits (exact I.) one by one
   //   4. close bullet 2 admit (exact I.) → Qed
 
-  it('list_admitted finds exactly 2 admits in the initial fixture', async () => {
+  it('focus_proof finds exactly 2 admits in the initial fixture', async () => {
     const tmpFile = tempFixture('deep_conj.v', 'dclist');
     await h.callTool('check_file', { file: tmpFile });
 
-    const r = await h.callTool('list_admitted', { file: tmpFile, name: 'deep_conj' });
+    const r = await h.callTool('focus_proof', { file: tmpFile, name: 'deep_conj' });
     expect(r.isError).toBe(false);
-    const hashes = [...r.text.matchAll(/([0-9a-f]{8})\s+L/g)].map(m => m[1]);
-    expect(hashes).toHaveLength(2);
+    const admits = extractAdmitHashes(r.text);
+    expect(admits).toHaveLength(2);
 
     removeTempFixture(tmpFile);
   }, TIMEOUT);
@@ -739,10 +738,10 @@ describe('deep_conj admit-split-close workflow', () => {
     const tmpFile = tempFixture('deep_conj.v', 'dcsplit');
     await h.callTool('check_file', { file: tmpFile });
 
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'deep_conj' });
-    const firstHash = list.text.match(/[0-9a-f]{8}/)![0];
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'deep_conj' });
+    const firstHash = extractAdmitHashes(list.text)[0]?.hash;
 
-    // bullet 1 goal is True /\ True — split. is non-closing, re-seals with a single admit.
+    // bullet 1 goal is True /\ True — split. creates 2 child admits + bullet 2 = 3 remaining
     const r = await h.callTool('insert_tactic', {
       file: tmpFile,
       name: 'deep_conj',
@@ -750,9 +749,8 @@ describe('deep_conj admit-split-close workflow', () => {
       admit_hash: firstHash,
     });
     expect(r.isError).toBe(false);
-    expect(r.text).toMatch(/sealed with admit/);
-    // re-sealed admit in bullet 1 + original admit in bullet 2 = 2 remaining
-    expect(r.text).toMatch(/2 admit\(s\) remaining/);
+    expect(r.text).toMatch(/sealed with 2 admits/);
+    expect(r.text).toMatch(/3 admit\(s\) remaining/);
 
     removeTempFixture(tmpFile);
   }, TIMEOUT);
@@ -762,35 +760,24 @@ describe('deep_conj admit-split-close workflow', () => {
     await h.callTool('check_file', { file: tmpFile });
 
     // Step 1: get initial admits
-    const list1 = await h.callTool('list_admitted', { file: tmpFile, name: 'deep_conj' });
-    const [hash1] = [...list1.text.matchAll(/([0-9a-f]{8})\s+L/g)].map(m => m[1]);
+    const list1 = await h.callTool('focus_proof', { file: tmpFile, name: 'deep_conj' });
+    const hash1 = extractAdmitHashes(list1.text)[0]?.hash;
 
-    // Step 2: split bullet 1 → re-seals with one admit covering both subgoals + bullet 2 = 2 admits
+    // Step 2: split bullet 1 → 2 child admits + bullet 2 = 3 admits total
     const splitR = await h.callTool('insert_tactic', {
       file: tmpFile, name: 'deep_conj', tactic: 'split.', admit_hash: hash1,
     });
     expect(splitR.isError).toBe(false);
-    expect(splitR.text).toMatch(/sealed with admit/);
+    expect(splitR.text).toMatch(/sealed with 2 admits/);
     const afterSplit = [...splitR.text.matchAll(/([0-9a-f]{8})\s+L/g)].map(m => m[1]);
-    expect(afterSplit).toHaveLength(2);
+    expect(afterSplit).toHaveLength(3);
 
-    // Step 3: close first subgoal of split. — re-seals again for the second subgoal → 2 remaining
+    // Step 3: all 3 remaining admits have goal True — same hash, exact I. closes all → Qed
     const r2 = await h.callTool('insert_tactic', {
       file: tmpFile, name: 'deep_conj', tactic: 'exact I.', admit_hash: afterSplit[0],
     });
     expect(r2.isError).toBe(false);
-    expect(r2.text).toMatch(/2 admit\(s\) remaining/);
-    const after2 = [...r2.text.matchAll(/([0-9a-f]{8})\s+L/g)].map(m => m[1]);
-    expect(after2).toHaveLength(2);
-
-    // Step 4: close remaining admits (second subgoal + bullet 2 both have goal True,
-    // so same hash — exact I. closes both in one call) → Qed
-    const r3 = await h.callTool('insert_tactic', {
-      file: tmpFile, name: 'deep_conj', tactic: 'exact I.', admit_hash: after2[0],
-    });
-    expect(r3.isError).toBe(false);
-    expect(r3.text).toMatch(/Qed applied/);
-    expect(r3.text).not.toMatch(/admit\(s\) remaining/);
+    expect(r2.text).toMatch(/Qed applied/);
 
     // File should be fully closed
     const content = fs.readFileSync(tmpFile, 'utf8');
@@ -896,11 +883,11 @@ describe('insert_tactic admit_hash mode', () => {
 
   it('replaces admits matching a given goal hash', async () => {
     // List all admits and use the first hash — replaces all admits with the same goal
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'has_admits' });
-    const hashes = [...list.text.matchAll(/([0-9a-f]{8})/g)].map(m => m[1]);
-    expect(hashes.length).toBeGreaterThanOrEqual(1);
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'has_admits' });
+    const admits = extractAdmitHashes(list.text);
+    expect(admits.length).toBeGreaterThanOrEqual(1);
 
-    const hash = hashes[0];
+    const hash = admits[0].hash;
     const countBefore = (fs.readFileSync(tmpFile, 'utf8').match(/^\s*- admit\./mg) ?? []).length;
 
     const r = await h.callTool('insert_tactic', {

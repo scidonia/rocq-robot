@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { McpHarness, createHarness, removeTempFixture, tempFixture, fixture } from './harness.js';
+import { McpHarness, createHarness, removeTempFixture, tempFixture, fixture, extractAdmitHashes } from './harness.js';
 
 const TIMEOUT = 90_000;
 
@@ -21,7 +21,7 @@ afterAll(async () => {
   await h.teardown();
 });
 
-describe('list_admitted on preservation', () => {
+describe('focus_proof on preservation', () => {
   const FIXTURE = fixture('preservation_stubs.v');
 
   // Warm up the file
@@ -30,23 +30,22 @@ describe('list_admitted on preservation', () => {
   }, TIMEOUT);
 
   it('finds 21 admits', async () => {
-    const r = await h.callTool('list_admitted', { file: FIXTURE, name: 'preservation' });
+    const r = await h.callTool('focus_proof', { file: FIXTURE, name: 'preservation' });
     expect(r.isError).toBe(false);
-    expect(r.text).toMatch(/21 admit/);
+    expect(extractAdmitHashes(r.text)).toHaveLength(21);
   });
 
   it('returns real hashes for bullet admits, not error', async () => {
-    const r = await h.callTool('list_admitted', { file: FIXTURE, name: 'preservation' });
-    const hashLines = r.text.split('\n').filter(l => /^[0-9a-f]{8}\s/.test(l));
-    expect(hashLines).toHaveLength(21);
-    const errorLines = r.text.split('\n').filter(l => l.startsWith('error'));
-    expect(errorLines).toHaveLength(0);
+    const r = await h.callTool('focus_proof', { file: FIXTURE, name: 'preservation' });
+    const admits = extractAdmitHashes(r.text);
+    expect(admits).toHaveLength(21);
+    expect(admits.filter(a => a.hash === 'error')).toHaveLength(0);
   });
 
   it('at least one admit shows a goal text', async () => {
-    const r = await h.callTool('list_admitted', { file: FIXTURE, name: 'preservation' });
-    const goalLines = r.text.split('\n').filter(l => /:\s+\S/.test(l));
-    expect(goalLines.length).toBeGreaterThan(0);
+    const r = await h.callTool('focus_proof', { file: FIXTURE, name: 'preservation' });
+    const admits = extractAdmitHashes(r.text);
+    expect(admits.some(a => a.goal.length > 0 && a.goal !== '(no goals)')).toBe(true);
   });
 });
 
@@ -61,8 +60,8 @@ describe('insert_tactic admit_hash on preservation', () => {
   afterAll(() => removeTempFixture(tmpFile));
 
   it('replaces first admit line via admit_hash', async () => {
-    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'preservation' });
-    const hash = list.text.match(/^([0-9a-f]{8})\s/m)?.[1];
+    const list = await h.callTool('focus_proof', { file: tmpFile, name: 'preservation' });
+    const hash = extractAdmitHashes(list.text)[0]?.hash;
     expect(hash).toBeTruthy();
 
     const r = await h.callTool('insert_tactic', {

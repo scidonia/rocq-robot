@@ -5,6 +5,7 @@ import {
   computeBulletIndent, proofBounds, findAdmitLines,
   admitPrefix, bulletInsertPos, replaceAdmitLine,
   replaceAllMatchingAdmits,
+  nextChildBullet, sealOpenGoals, applyAutoQed,
 } from './coq-utils.js';
 import { applyTextEdits } from './document-manager.js';
 
@@ -1068,5 +1069,145 @@ describe('replaceAllMatchingAdmits', () => {
     expect(count).toBe(1);
     expect(text).toContain('- exact I.');
     expect(text).toContain('- admit.'); // second one still there
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// nextChildBullet
+// ═══════════════════════════════════════════════════════════════════
+
+describe('nextChildBullet', () => {
+  it('- → +', () => expect(nextChildBullet('-')).toBe('+'));
+  it('+ → *', () => expect(nextChildBullet('+')).toBe('*'));
+  it('* → --', () => expect(nextChildBullet('*')).toBe('--'));
+  it('-- → ++', () => expect(nextChildBullet('--')).toBe('++'));
+  it('++ → **', () => expect(nextChildBullet('++')).toBe('**'));
+  it('** → ---', () => expect(nextChildBullet('**')).toBe('---'));
+  it('undefined → -', () => expect(nextChildBullet(undefined)).toBe('-'));
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// sealOpenGoals
+// ═══════════════════════════════════════════════════════════════════
+
+describe('sealOpenGoals', () => {
+  const proof = [
+    'Lemma foo : True /\\ True.',
+    'Proof.',
+    '- intro n.',
+    'split.',
+    'Admitted.',
+  ].join('\n');
+
+  it('nOpen=0 — no change', () => {
+    const { text: out, sealMsg } = sealOpenGoals(proof, 3, 0, '- intro n.');
+    expect(out).toBe(proof);
+    expect(sealMsg).toBe('');
+  });
+
+  it('nOpen=1 — inserts single flat admit after tactic line', () => {
+    const { text: out, sealMsg } = sealOpenGoals(proof, 3, 1, '- intro n.');
+    const lines = out.split('\n');
+    // parent "- " at indent 0 → tactic indent = 0 + 1 + 1 = 2
+    expect(lines[4]).toMatch(/^ {2}admit\.$/);
+    expect(sealMsg).toMatch(/1 goal/);
+  });
+
+  it('nOpen=2 under "-" parent — child token is "+"', () => {
+    const { text: out, sealMsg } = sealOpenGoals(proof, 3, 2, '- intro n.');
+    const lines = out.split('\n');
+    expect(lines[4]).toBe('  + admit.');
+    expect(lines[5]).toBe('  + admit.');
+    expect(sealMsg).toMatch(/2 admit/);
+  });
+
+  it('nOpen=2 under "+" parent — child token is "*"', () => {
+    const text = [
+      'Lemma foo : True.',
+      'Proof.',
+      '  + intro n.',
+      '  split.',
+      'Admitted.',
+    ].join('\n');
+    const { text: out } = sealOpenGoals(text, 3, 2, '  + intro n.');
+    const lines = out.split('\n');
+    expect(lines[4]).toBe('    * admit.');
+    expect(lines[5]).toBe('    * admit.');
+  });
+
+  it('nOpen=3 — inserts 3 child-bulleted admits', () => {
+    const { text: out } = sealOpenGoals(proof, 3, 3, '- intro n.');
+    const lines = out.split('\n');
+    expect(lines[4]).toBe('  + admit.');
+    expect(lines[5]).toBe('  + admit.');
+    expect(lines[6]).toBe('  + admit.');
+  });
+
+  it('no parent bullet line — inserts admit with 2-space fallback indent', () => {
+    const text = [
+      'Lemma foo : True.',
+      'Proof.',
+      'split.',
+      'Admitted.',
+    ].join('\n');
+    const { text: out } = sealOpenGoals(text, 2, 1, undefined);
+    const lines = out.split('\n');
+    expect(lines[3]).toMatch(/admit\./);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// applyAutoQed
+// ═══════════════════════════════════════════════════════════════════
+
+describe('applyAutoQed', () => {
+  it('replaces Admitted. with Qed. when no admit. lines remain', () => {
+    const text = [
+      'Lemma foo : True.',
+      'Proof.',
+      '  exact I.',
+      'Admitted.',
+    ].join('\n');
+    const { text: out, applied } = applyAutoQed(text, 'foo');
+    expect(applied).toBe(true);
+    expect(out).toContain('Qed.');
+    expect(out).not.toMatch(/Admitted\./);
+  });
+
+  it('does NOT replace when admit. lines remain', () => {
+    const text = [
+      'Lemma foo : True /\\ True.',
+      'Proof.',
+      '  split.',
+      '  - admit.',
+      '  - exact I.',
+      'Admitted.',
+    ].join('\n');
+    const { text: out, applied } = applyAutoQed(text, 'foo');
+    expect(applied).toBe(false);
+    expect(out).toBe(text);
+  });
+
+  it('does NOT replace when proof name not found', () => {
+    const text = [
+      'Lemma foo : True.',
+      'Proof.',
+      '  exact I.',
+      'Admitted.',
+    ].join('\n');
+    const { applied } = applyAutoQed(text, 'bar');
+    expect(applied).toBe(false);
+  });
+
+  it('already Qed. — no-op (no Admitted. to replace)', () => {
+    const text = [
+      'Lemma foo : True.',
+      'Proof.',
+      '  exact I.',
+      'Qed.',
+    ].join('\n');
+    const { text: out, applied } = applyAutoQed(text, 'foo');
+    expect(applied).toBe(false);
+    expect(out).toBe(text);
   });
 });

@@ -16,7 +16,7 @@ import {
 import { RocqLspClient } from './lsp-client.js';
 import { DocumentManager, applyTextEdits } from './document-manager.js';
 import { detectProjectConfig, mergeProjectArgs, findProjectRoot } from './project-config.js';
-import { isSkipLine, isProofEndLine, isTopLevelLine, autoAdvancePosition, insertPosition, findProofLine, computeBulletIndent, proofBounds, findAdmitLines, bulletInsertPos, admitPrefix, replaceAdmitLine, replaceAllMatchingAdmits } from './coq-utils.js';
+import { isSkipLine, isProofEndLine, isTopLevelLine, autoAdvancePosition, insertPosition, findProofLine, computeBulletIndent, proofBounds, findAdmitLines, findTacticAdmitLines, bulletInsertPos, admitPrefix, replaceAdmitLine, replaceAllMatchingAdmits, nextChildBullet, sealOpenGoals, applyAutoQed } from './coq-utils.js';
 import type {
   Position,
   Range,
@@ -188,13 +188,6 @@ async function main() {
     return message?.match(/[-+*]+/)?.[0];
   }
 
-  function nextChildBullet(parent: string | undefined): string {
-    if (!parent) return '-';
-    if (/^-+$/.test(parent)) return '+'.repeat(parent.length);
-    if (/^\++$/.test(parent)) return '*'.repeat(parent.length);
-    if (/^\*+$/.test(parent)) return '-'.repeat(parent.length + 1);
-    return '-';
-  }
 
   function bulletLineInfo(line: string): { indent: number; token: string } | undefined {
     const trimmed = line.trimStart();
@@ -492,7 +485,7 @@ async function main() {
           description:
             'Insert a tactic into a proof and return updated goals. ' +
             'Auto-prepends bullet prefix. Pass replace:true to retry. ' +
-            'Pass admit_hash to replace a specific admitted bullet (from list_admitted).',
+            'Pass admit_hash to replace a specific admitted bullet (hash from focus_proof).',
           inputSchema: {
             type: 'object',
             properties: {
@@ -501,7 +494,7 @@ async function main() {
               tactic: { type: 'string' },
               follow_with_goals: { type: 'boolean', description: 'Query goals after inserting' },
               replace: { type: 'boolean', description: 'Replace the last inserted tactic' },
-              admit_hash: { type: 'string', description: 'Hash from list_admitted — replace this admit with tactic' },
+              admit_hash: { type: 'string', description: 'Hash from focus_proof admits section — replace this admit with tactic' },
             },
             required: ['file', 'name', 'tactic'],
           },
@@ -767,21 +760,6 @@ async function main() {
             required: ['file', 'name'],
           },
         },
-        {
-          name: 'list_admitted',
-          description:
-            'List all admit. lines within a proof body with their goal hashes. ' +
-            'Returns line numbers, goal summaries, and hashes. Use the hash with insert_tactic (admit_hash parameter) to replace a specific admit.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              file: { type: 'string', description: 'Path to a .v file' },
-              name: { type: 'string', description: 'Proof name (e.g. "preservation")' },
-            },
-            required: ['file', 'name'],
-          },
-        },
-
       ],
     };
   });
@@ -908,7 +886,7 @@ async function main() {
       if (total === 0) {
         const nGivenUp = gc?.given_up?.length || 0;
         if (nGivenUp > 0) {
-          return `${nGivenUp} goal(s) admitted — use list_admitted to find them.`;
+          return `${nGivenUp} goal(s) admitted — use focus_proof to see them with hashes.`;
         }
         return 'Proof complete. Qed auto-applied.';
       }
@@ -929,7 +907,57 @@ async function main() {
       }).join('\n');
     }
 
-    function fileLine(file: string, line: number): string {
+    /**
+   * Query the goal hash for every addressable admit in a proof.
+   * Includes tactic-level `admit.` lines AND the root `Admitted.` when
+   * no tactic admits exist.  Returns one entry per admit.
+   */
+  async function queryAdmitHashes(
+    doc: { uri: string; text: string },
+    docLines: string[],
+    bounds: { proofLine: number; endLine: number },
+  ): Promise<Array<{ hash: string; line: number; goal: string }>> {
+    const admitLineNums = findAdmitLines(docLines, bounds.proofLine, bounds.endLine);
+    const admitted: Array<{ hash: string; line: number; goal: string }> = [];
+    for (const line of admitLineNums) {
+      try {
+        const lineText = docLines[line] || '';
+        const isRootAdmitted = lineText.trim() === 'Admitted.';
+        let snapLine = line, snapChar = 0;
+        if (isRootAdmitted) {
+          for (let i = line - 1; i > bounds.proofLine; i--) {
+            const t = (docLines[i] || '').trim();
+            if (t !== '' && t !== 'Proof.') {
+              snapLine = i; snapChar = (docLines[i] || '').length; break;
+            }
+          }
+          if (snapLine === line) {
+            snapLine = bounds.proofLine;
+            snapChar = (docLines[bounds.proofLine] || '').length;
+          }
+        } else {
+          const admitIdx = lineText.search(/\badmit\b/);
+          snapChar = admitIdx > 0 ? admitIdx - 1 : 0;
+        }
+        const stateR = await retryDocumentNotReady(() =>
+          lspClient.sendRequest<RunResult<number>>('petanque/get_state_at_pos', {
+            uri: doc.uri, position: { line: snapLine, character: snapChar }, opts: { memo: false },
+          })
+        );
+        const goalsR = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
+          st: stateR.st, opts: { compact: true },
+        });
+        const goalText = (goalsR.goals || []).map((g: any) => (g.ty || '').replace(/\s+/g, ' ')).join(' | ');
+        const hash = createHash('md5').update(goalText).digest('hex').slice(0, 8);
+        admitted.push({ hash, line: line + 1, goal: goalText || '(no goals)' });
+      } catch {
+        admitted.push({ hash: 'error', line: line + 1, goal: '(could not query)' });
+      }
+    }
+    return admitted;
+  }
+
+  function fileLine(file: string, line: number): string {
       const base = file.split('/').pop() || file;
       return `${base}:${line + 1}`;
     }
@@ -1094,6 +1122,17 @@ async function main() {
             parts.push('');
             parts.push('-- proof script ----------');
             scriptLines.forEach(l => parts.push(`  ${l}`));
+          }
+
+          // Admit hashes — included directly so LLM can go straight to insert_tactic
+          const bounds = proofBounds(docLines, name);
+          if (bounds) {
+            const admitted = await queryAdmitHashes(doc, docLines, bounds);
+            if (admitted.length > 0) {
+              parts.push('');
+              parts.push(`-- admits (${admitted.length}) ----------`);
+              admitted.forEach(a => parts.push(`  ${a.hash}  L${a.line}: ${a.goal}`));
+            }
           }
 
           const hint = nextHint(gc);
@@ -1404,7 +1443,7 @@ async function main() {
             if (targetLines.length === 0) throw new Error(`No admit found with hash "${admit_hash}"`);
 
             // Apply tactic to ALL matching admits using shared replaceAllMatchingAdmits.
-            // getGoalText calls the LSP — same function as list_admitted uses.
+            // getGoalText calls the LSP — same function as focus_proof admits section uses.
             pushFileHistory(file, doc.text, null);
             const { text: finalText, count: totalReplaced } = await replaceAllMatchingAdmits(
               doc.text, name, tactic, admit_hash,
@@ -1439,8 +1478,9 @@ async function main() {
               await ensureDocumentOpened(file);
             } catch {}
 
-            // Query goals to check if tactic closed the bullet; seal if not
+            // Re-seal open goals and auto-Qed using shared coq-utils helpers.
             let sealMsg = '';
+            let autoQedMsg = '';
             try {
               const freshDoc = docManager.getDocument(file)!;
               const firstLine = targetLines[0];
@@ -1451,53 +1491,28 @@ async function main() {
                   pp_format: 'Str', mode: 'After',
                 })
               );
-              const gc = goalsR?.goals;
-              const nF = gc?.goals?.length ?? 0;
-              const nB = (gc?.stack || []).reduce((s: number, [b, a]: any[]) => s + (b?.length || 0) + (a?.length || 0), 0);
+              const nF = goalsR?.goals?.goals?.length ?? 0;
               if (nF > 0) {
-                const lines = finalText.split('\n');
-                const bulletLine = lines[firstLine] || '';
+                const docLines = finalText.split('\n');
                 const tacticLines = (tactic.match(/\n/g) || []).length + 1;
-                const sealLine = firstLine + tacticLines;
-                const match = bulletLine.match(/^(\s*[-+*])\s/);
-                const indent = match ? match[1].length : 2;
-                const seal = ' '.repeat(indent) + 'admit.\n';
-                const sealed = applyTextEdits(finalText, [{
-                  range: { start: { line: sealLine, character: 0 }, end: { line: sealLine, character: 0 } },
-                  newText: seal,
-                }]);
+                const tacticEndLine = firstLine + tacticLines - 1;
+                const parentBulletLine = docLines[firstLine] || '';
+                const { text: sealed, sealMsg: msg } = sealOpenGoals(
+                  finalText, tacticEndLine, nF, parentBulletLine
+                );
+                sealMsg = ` (${msg})`;
                 await docManager.updateDocument(file, sealed);
                 await docManager.saveDocument(file);
-                sealMsg = ` (sealed with admit — ${nF} goal(s) open after tactic)`;
               }
             } catch { /* best-effort */ }
 
-            // Auto-Qed: if no admit. lines remain in the proof, replace Admitted. → Qed.
-            let autoQedMsg = '';
             try {
               const currentDoc = docManager.getDocument(file)!;
-              const currentLines = currentDoc.text.split('\n');
-              const freshBounds = proofBounds(currentLines, name);
-              if (freshBounds) {
-                const remainingAdmits = findAdmitLines(currentLines, freshBounds.proofLine, freshBounds.endLine);
-                if (remainingAdmits.length === 0) {
-                  // All admits gone — close with Qed.
-                  const admittedLine = currentLines.findIndex(
-                    (l, i) => i > freshBounds.proofLine && /^\s*Admitted\./.test(l)
-                  );
-                  if (admittedLine >= 0) {
-                    const qedText = applyTextEdits(currentDoc.text, [{
-                      range: {
-                        start: { line: admittedLine, character: 0 },
-                        end:   { line: admittedLine + 1, character: 0 },
-                      },
-                      newText: 'Qed.\n',
-                    }]);
-                    await docManager.updateDocument(file, qedText);
-                    await docManager.saveDocument(file);
-                    autoQedMsg = ' — Qed applied';
-                  }
-                }
+              const { text: qedText, applied } = applyAutoQed(currentDoc.text, name);
+              if (applied) {
+                await docManager.updateDocument(file, qedText);
+                await docManager.saveDocument(file);
+                autoQedMsg = ' — Qed applied';
               }
             } catch { /* best-effort */ }
 
@@ -1566,6 +1581,11 @@ async function main() {
           }
 
 
+          // Determine whether the user already supplied a bullet prefix.
+          // Used both inside and outside the bullet-logic try block.
+          const tacticFirstWord = tactic.split(/\s+/)[0];
+          const hasBullet = /^[-+*]+$/.test(tacticFirstWord) || tacticFirstWord === '{';
+
           if (!fromAdmitReplacement) {
           try {
             // Query at end of previous non-blank line to get correct stack depth
@@ -1596,8 +1616,6 @@ async function main() {
             const lspSuggestsNext = !!lspBullet?.includes('Focus next goal');
             const lspUnfinished = !!lspBullet?.includes('unfinished') || !!lspBullet?.includes('not finished');
             let bullet: string | undefined;
-            const firstWord = tactic.split(/\s+/)[0];
-            const hasBullet = /^[-+*]+$/.test(firstWord) || firstWord === '{';
 
             const atLineStart = insPos.character === 0;
             let indent = '';
@@ -1834,30 +1852,14 @@ async function main() {
           const canAutoClose = nFocus === 0 && nBg === 0 && nGivenUp === 0 &&
             gcAfter !== undefined && gcAfter !== null && !hasErrors;
           if (canAutoClose) {
-            const currentDoc = docManager.getDocument(file);
-            if (currentDoc) {
-              const lines = currentDoc.text.split('\n');
-              // Find the Admitted. line starting from the insert position
-              let admittedLine = -1;
-              for (let i = insPos.line; i < lines.length; i++) {
-                if (lines[i].trim() === 'Admitted.') {
-                  admittedLine = i;
-                  break;
-                }
-              }
-              if (admittedLine >= 0) {
-                const replaceEdit = {
-                  range: {
-                    start: { line: admittedLine, character: 0 },
-                    end: { line: admittedLine, character: lines[admittedLine].length },
-                  },
-                  newText: 'Qed.\n',
-                };
-                const newText = docManager.applyEdits(currentDoc.text, [replaceEdit]);
-                await docManager.updateDocument(file, newText);
+            try {
+              const currentDoc = docManager.getDocument(file)!;
+              const { text: qedText, applied } = applyAutoQed(currentDoc.text, name);
+              if (applied) {
+                await docManager.updateDocument(file, qedText);
                 await docManager.saveDocument(file);
               }
-            }
+            } catch { /* best-effort */ }
           }
 
           // Extract proof script for context
@@ -2827,46 +2829,7 @@ async function main() {
           );
         }
 
-        case 'list_admitted': {
-          const { file, name } = args as { file: string; name: string };
-          const doc = await ensureDocumentOpened(file);
-          const docLines = doc.text.split('\n');
-          const bounds = proofBounds(docLines, name);
-          if (!bounds) throw new Error(`Proof not found: "${name}"`);
-          const admitLines = findAdmitLines(docLines, bounds.proofLine, bounds.endLine);
 
-          const admitted: Array<{ hash: string; line: number; goal: string }> = [];
-          for (const line of admitLines) {
-            try {
-              // Snap just before 'admit' to get the pre-admit goal state.
-              const lineText = docLines[line] || '';
-              const admitIdx = lineText.search(/\badmit\b/);
-              const character = admitIdx > 0 ? admitIdx - 1 : 0;
-              const stateR = await retryDocumentNotReady(() =>
-                lspClient.sendRequest<RunResult<number>>('petanque/get_state_at_pos', {
-                  uri: doc.uri,
-                  position: { line, character },
-                  opts: { memo: false },
-                })
-              );
-              const goalsR = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
-                st: stateR.st,
-                opts: { compact: true },
-              });
-              const goalText = (goalsR.goals || []).map(g => (g.ty || '').replace(/\s+/g, ' ')).join(' | ');
-              const hash = createHash("md5").update(goalText).digest("hex").slice(0, 8);
-              admitted.push({ hash, line: line + 1, goal: goalText || '(no goals)' });
-            } catch {
-              admitted.push({ hash: 'error', line: line + 1, goal: '(could not query)' });
-            }
-          }
-
-          return reply(
-            `${admitted.length} admit(s) in proof "${name}"` +
-            (admitted.length > 0 ? '\n' + admitted.map(a => `${a.hash}  L${a.line}: ${a.goal}`).join('\n') : ''),
-            { admitted }
-          );
-        }
 
         default:
           throw new Error(`Unknown tool: ${name}`);

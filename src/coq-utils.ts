@@ -152,20 +152,28 @@ export function proofBounds(lines: string[], proofName: string): { proofLine: nu
 }
 
 /**
- * Find all admit. (lowercase, tactic-level) lines within a proof body.
- * Returns the 0-indexed line numbers of each admit.
+ * Find all addressable admit positions within a proof body.
+ *
+ * Tactic-level `admit.` lines are always included.
+ *
+ * When there are NO tactic-level admits, the closing `Admitted.` line itself
+ * is included as the single root admit — it represents the whole unstarted
+ * proof and can be targeted by admit_hash just like any tactic-level admit.
+ *
+ * Returns 0-indexed line numbers.
  */
 export function findAdmitLines(lines: string[], proofLine: number, endLine: number): number[] {
   const admitted: number[] = [];
   for (let i = proofLine + 1; i < endLine; i++) {
     const t = lines[i].trim();
-    // Match standalone `admit.` bullets and also `admit` used as a tactic
-    // inside bracket expressions (e.g. `[exact Hok | admit]`).
-    // Exclude `Admitted.` (the proof-closing command).
     if (t === 'Admitted.' || t === 'Qed.' || t === 'Defined.') continue;
     if (t === 'admit.' || t.endsWith(' admit.') || /\badmit\b/.test(t)) {
       admitted.push(i);
     }
+  }
+  // No tactic-level admits — treat Admitted. as the single root admit.
+  if (admitted.length === 0 && endLine >= 0 && lines[endLine]?.trim() === 'Admitted.') {
+    admitted.push(endLine);
   }
   return admitted;
 }
@@ -192,10 +200,15 @@ export function bulletInsertPos(line: string): number {
 }
 
 /**
- * Replace an admit. line with a new tactic + re-seal admit.
- * Given text and the line number of an admit., replaces that line
- * with the bullet prefix, inserts the tactic at the right position,
- * and re-seals with admit. afterwards.
+ * Replace an admit. line (or the root Admitted.) with a new tactic.
+ *
+ * For tactic-level `admit.` lines: replaces the line with the bullet prefix +
+ * tactic.  The caller (sealOpenGoals / replaceAllMatchingAdmits) is responsible
+ * for inserting re-seal admits when the tactic leaves goals open.
+ *
+ * For the root `Admitted.` line: inserts the tactic on a new line immediately
+ * before `Admitted.`, preserving `Admitted.` so the proof stays syntactically
+ * valid until the caller promotes it to Qed.
  *
  * Returns the new text, or the original if the line wasn't an admit.
  */
@@ -206,9 +219,18 @@ export function replaceAdmitLine(
 ): string {
   const lines = text.split('\n');
   const line = lines[admitLine] || '';
+
+  // Root Admitted. — insert tactic before it.
+  if (line.trim() === 'Admitted.') {
+    return applyTextEdits(text, [{
+      range: { start: { line: admitLine, character: 0 }, end: { line: admitLine, character: 0 } },
+      newText: `${tactic}\n`,
+    }]);
+  }
+
+  // Tactic-level admit. — replace the admit line.
   const prefix = admitPrefix(line);
   if (!line.includes('admit.')) return text;
-
   return applyTextEdits(text, [{
     range: { start: { line: admitLine, character: 0 }, end: { line: admitLine + 1, character: 0 } },
     newText: prefix ? `${prefix}${tactic}\n` : `${tactic}\n`,
@@ -253,4 +275,119 @@ export async function replaceAllMatchingAdmits(
   }
 
   return { text: currentText, count };
+}
+
+/**
+ * Compute the child bullet token for a given parent token.
+ *   -  →  +
+ *   +  →  *
+ *   *  →  -- (longer dash sequence)
+ */
+export function nextChildBullet(parent: string | undefined): string {
+  if (!parent) return '-';
+  if (/^-+$/.test(parent)) return '+'.repeat(parent.length);
+  if (/^\++$/.test(parent)) return '*'.repeat(parent.length);
+  if (/^\*+$/.test(parent)) return '-'.repeat(parent.length + 1);
+  return '-';
+}
+
+/**
+ * After a tactic insertion at `tacticLine` leaves `nOpen` goals open,
+ * insert admit(s) immediately after the tactic to re-seal the proof.
+ *
+ * If nOpen === 1: inserts a single flat admit at the same indent as the tactic.
+ * If nOpen > 1:  inserts nOpen child-bulleted admits so each goal is individually
+ *                addressable by hash.
+ *
+ * `parentBulletLine` is the raw text of the line that opened the current bullet
+ * (e.g. "  - intro n.").  Used to determine the parent token and indent level.
+ * If absent, falls back to a 2-space indent with no bullet.
+ *
+ * Returns the new text with the seals inserted.
+ */
+export function sealOpenGoals(
+  text: string,
+  tacticLine: number,
+  nOpen: number,
+  parentBulletLine?: string,
+): { text: string; sealMsg: string } {
+  if (nOpen <= 0) return { text, sealMsg: '' };
+
+  const match = parentBulletLine?.match(/^(\s*)([-+*]+)\s/);
+  const parentIndent = match ? match[1].length : 0;
+  const parentToken = match ? match[2] : undefined;
+
+  let seal: string;
+  let sealMsg: string;
+
+  if (nOpen > 1) {
+    const childToken = nextChildBullet(parentToken);
+    const childIndent = ' '.repeat(parentIndent + 2);
+    seal = Array.from({ length: nOpen }, () => `${childIndent}${childToken} admit.\n`).join('');
+    sealMsg = `sealed with ${nOpen} admits — ${nOpen} goal(s) open after tactic`;
+  } else {
+    const tacticIndent = match ? parentIndent + parentToken!.length + 1 : 2;
+    seal = ' '.repeat(tacticIndent) + 'admit.\n';
+    sealMsg = 'sealed with admit — 1 goal(s) open after tactic';
+  }
+
+  const newText = applyTextEdits(text, [{
+    range: {
+      start: { line: tacticLine + 1, character: 0 },
+      end:   { line: tacticLine + 1, character: 0 },
+    },
+    newText: seal,
+  }]);
+
+  return { text: newText, sealMsg };
+}
+
+/**
+ * Find only tactic-level `admit.` lines — excludes the root `Admitted.`.
+ * Used by applyAutoQed and any caller that needs to know whether
+ * actual in-proof admits remain (as opposed to the unstarted-proof marker).
+ */
+export function findTacticAdmitLines(lines: string[], proofLine: number, endLine: number): number[] {
+  const admitted: number[] = [];
+  for (let i = proofLine + 1; i < endLine; i++) {
+    const t = lines[i].trim();
+    if (t === 'Admitted.' || t === 'Qed.' || t === 'Defined.') continue;
+    if (t === 'admit.' || t.endsWith(' admit.') || /\badmit\b/.test(t)) {
+      admitted.push(i);
+    }
+  }
+  return admitted;
+}
+
+/**
+ * If no tactic-level `admit.` lines remain in the named proof, replace
+ * the closing `Admitted.` with `Qed.`.
+ *
+ * Returns the (possibly updated) text and whether the replacement was made.
+ */
+export function applyAutoQed(
+  text: string,
+  proofName: string,
+): { text: string; applied: boolean } {
+  const lines = text.split('\n');
+  const bounds = proofBounds(lines, proofName);
+  if (!bounds) return { text, applied: false };
+
+  // Only block Qed on tactic-level admits — the root Admitted. is the target.
+  const tacticAdmits = findTacticAdmitLines(lines, bounds.proofLine, bounds.endLine);
+  if (tacticAdmits.length > 0) return { text, applied: false };
+
+  const admittedIdx = lines.findIndex(
+    (l, i) => i > bounds.proofLine && /^\s*Admitted\./.test(l)
+  );
+  if (admittedIdx < 0) return { text, applied: false };
+
+  const newText = applyTextEdits(text, [{
+    range: {
+      start: { line: admittedIdx, character: 0 },
+      end:   { line: admittedIdx + 1, character: 0 },
+    },
+    newText: 'Qed.\n',
+  }]);
+  return { text: newText, applied: true };
 }

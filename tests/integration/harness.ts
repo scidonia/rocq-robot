@@ -84,3 +84,22 @@ export async function createHarness(): Promise<McpHarness> {
   await h.connect();
   return h;
 }
+
+/**
+ * Extract admit hashes from a focus_proof response.
+ * The admits section looks like:
+ *   -- admits (N) ----------
+ *     abc12345  L7: True /\ True
+ *     def67890  L8: True
+ */
+export function extractAdmitHashes(focusText: string): Array<{ hash: string; line: number; goal: string }> {
+  const result: Array<{ hash: string; line: number; goal: string }> = [];
+  const inAdmits = focusText.includes('-- admits');
+  if (!inAdmits) return result;
+  const section = focusText.split('-- admits')[1] ?? '';
+  for (const line of section.split('\n')) {
+    const m = line.match(/([0-9a-f]{8})\s+L(\d+):\s+(.*)/);
+    if (m) result.push({ hash: m[1], line: parseInt(m[2]), goal: m[3].trim() });
+  }
+  return result;
+}
