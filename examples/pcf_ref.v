@@ -38,7 +38,6 @@ Inductive value : tm -> Prop :=
   | V_Lam : forall T t, value (Lam T t)
   | V_Loc : forall l, value (Loc l).
 
-(** shift: increment free variable indices by 1 (leaving bound vars alone) *)
 Fixpoint shift_at (d : nat) (t : tm) : tm :=
   match t with
   | Var x => if x <? d then Var x else Var (x + 1)
@@ -56,7 +55,6 @@ Fixpoint shift_at (d : nat) (t : tm) : tm :=
 
 Definition shift (t : tm) : tm := shift_at 0 t.
 
-(** subst: single-variable de Bruijn substitution (correct: shifts under binders) *)
 Fixpoint subst (j : nat) (s t : tm) : tm :=
   match t with
   | Var x => if Nat.eqb x j then s else Var x
@@ -84,7 +82,7 @@ Fixpoint heap_update (l : nat) (v : tm) (mu : heap) : heap :=
   match mu with
   | [] => []
   | (l', v') :: mu' => if Nat.eqb l l' then (l, v) :: mu'
-                       else (l', v') :: heap_update l v mu'
+                        else (l', v') :: heap_update l v mu'
   end.
 
 Inductive heap_ok : heap -> store_ty -> Prop :=
@@ -116,111 +114,88 @@ Inductive step : tm -> heap -> tm -> heap -> Prop :=
 
 Definition extends (S' S : store_ty) : Prop := exists S2, S' = S ++ S2.
 
-(** * Lemmas for the preservation proof *)
+(** * Type Preservation *)
 
-Lemma nth_error_app_prefix : forall A (G1 G2 : list A) (x : nat) (T' : A),
-  x < length G1 -> nth_error (G1 ++ T' :: G2) x = nth_error G1 x.
-Proof.
-  induction G1; simpl; intros. lia.
-  destruct x; simpl; auto. apply IHG1. lia.
-Qed.
 
-Lemma nth_error_app_suffix : forall A (G1 G2 : list A) (x : nat) (T' : A) T,
-  length G1 <= x ->
-  nth_error (G1 ++ G2) x = Some T ->
-  nth_error (G1 ++ T' :: G2) (x + 1) = Some T.
-Proof.
-  induction G1; simpl; intros. apply H0.
-  destruct x. lia. simpl. apply IHG1. lia. apply H0.
-Qed.
 
-Lemma shift_at_preserves_typing : forall G1 G2 S t T T',
-  has_type (G1 ++ G2) S t T ->
-  has_type (G1 ++ T' :: G2) S (shift_at (length G1) t) T.
+
+Lemma shift_at_typing : forall G1 G2 S t T T', has_type (G1 ++ G2) S t T -> has_type (G1 ++ T' :: G2) S (shift_at (length G1) t) T.
 Proof.
-  intros G1 G2 S t T T' Hty.
+intros G1 G2 S t T T' Hty.
   remember (G1 ++ G2) as Gamma.
   generalize dependent G2. generalize dependent G1.
-  induction Hty; simpl; intros G1' G2' Heq; subst Gamma.
-  - (* T_Var *)
-    rename H into Hnth.
-    destruct (Nat.ltb_spec x (length G1')).
-    + apply T_Var. rewrite nth_error_app_prefix by auto. exact Hnth.
-    + apply T_Var. eapply nth_error_app_suffix; eauto. lia.
+  induction Hty; intros G1' G2' Heq; subst; simpl.
+  - (* T_Var *) destruct (Nat.ltb_spec x (length G1')).
+    + apply T_Var. rewrite nth_error_app1 in H by auto. rewrite nth_error_app1 by auto. exact H.
+    + apply T_Var. replace (x + 1) with (S x) by lia. rewrite nth_error_app2 in H by lia. rewrite nth_error_app2 by lia. simpl. rewrite Nat.sub_succ_l by lia. exact H.
   - apply T_Num.
   - apply T_Bool.
   - apply T_Succ; eauto.
   - apply T_Pred; eauto.
   - apply T_IsZero; eauto.
   - apply T_If; eauto.
-  - (* T_Lam *)
-    apply T_Lam.
-    replace (T1 :: G1' ++ T' :: G2') with ((T1 :: G1') ++ T' :: G2') by reflexivity.
-    apply (IHHty (T1 :: G1') G2'). simpl. rewrite Heq. reflexivity.
-  - apply T_App with T1; eauto.
-  - (* T_Fix *)
-    apply T_Fix.
-    replace (T0 :: G1' ++ T' :: G2') with ((T0 :: G1') ++ T' :: G2') by reflexivity.
-    apply (IHHty (T0 :: G1') G2'). simpl. rewrite Heq. reflexivity.
+  - apply T_Lam. replace (T1 :: G1' ++ T' :: G2') with ((T1 :: G1') ++ T' :: G2') by reflexivity. apply (IHHty (T1 :: G1') G2'). simpl. rewrite Heq. reflexivity.
+  - eapply T_App; eauto.
+  - apply T_Fix. replace (T0 :: G1' ++ T' :: G2') with ((T0 :: G1') ++ T' :: G2') by reflexivity. apply (IHHty (T0 :: G1') G2'). simpl. rewrite Heq. reflexivity.
   - apply T_Ref; eauto.
   - apply T_Deref; eauto.
-  - apply T_Assign with T; eauto.
+  - eapply T_Assign; eauto.
   - apply T_Loc. exact H.
 Qed.
 
-Lemma shift_preserves_typing : forall T' G S t T,
-  has_type G S t T -> has_type (T' :: G) S (shift t) T.
+Lemma shift_typing : forall T' G S t T, has_type G S t T -> has_type (T' :: G) S (shift t) T.
 Proof.
-  intros. apply (shift_at_preserves_typing [] G S t T T'); simpl; auto.
+intros. apply (shift_at_typing [] G S t T T'). simpl. exact H.
 Qed.
 
-Lemma substitution_preserves_typing : forall G S t T U s,
-  has_type (G ++ [U]) S t T ->
-  has_type G S s U ->
-  has_type G S (subst (length G) s t) T.
+
+Lemma substitution_preserves_typing : forall G S t T U s, has_type (G ++ [U]) S t T -> has_type G S s U -> has_type G S (subst (length G) s t) T.
 Proof.
-  intros G S t T U s Hty Hs.
+intros G S t T U s Hty Hs.
   remember (G ++ [U]) as Gamma.
-  generalize dependent s.
   generalize dependent G.
-  induction Hty; intros G' Heq s' Hs'; subst Gamma; simpl.
-  - (* T_Var *)
-    rename H into Hnth.
-    destruct (Nat.ltb_spec x (length G')).
-    + (* x < length G' *)
-      rewrite nth_error_app_prefix with (T' := U) (G1 := G') (G2 := []) in Hnth by auto.
-      apply T_Var. exact Hnth.
-    + (* x >= length G', so x = length G' since G++[U] has length G+1 *)
-      apply T_Var.
-      replace (length G') with x by lia.
-      apply nth_error_app_suffix with (G1 := G') (G2 := []) (T' := U); auto.
-      lia. exact Hnth.
+  induction Hty; intros G' HeqG Hs'; subst; simpl.
+  - rename H into Hnth. destruct (Nat.eqb_spec x (length G')).
+    + subst. rewrite Nat.eqb_refl. assert (nth_error (G' ++ [U]) (length G') = Some U) by (rewrite nth_error_app2 by lia; simpl; rewrite Nat.sub_diag; reflexivity). rewrite Hnth in H. injection H; intros; subst. exact Hs'.
+    + rewrite <- Nat.eqb_neq in n. rewrite Nat.eqb_sym in n. rewrite n. apply T_Var. exact Hnth.
   - apply T_Num.
   - apply T_Bool.
-  - apply T_Succ; apply IHHty with (G := G'); auto.
-  - apply T_Pred; apply IHHty with (G := G'); auto.
-  - apply T_IsZero; apply IHHty with (G := G'); auto.
-  - apply T_If; [apply IHHty1 with (G := G') | apply IHHty2 with (G := G') | apply IHHty3 with (G := G')]; auto.
-  - (* T_Lam *)
-    apply T_Lam.
-    replace (T1 :: G' ++ [U]) with ((T1 :: G') ++ [U]) by reflexivity.
-    apply (IHHty (T1 :: G')); auto.
-    simpl. reflexivity.
-    apply shift_preserves_typing. auto.
-  - apply T_App with T1; [apply IHHty1 with (G := G') | apply IHHty2 with (G := G')]; auto.
-  - (* T_Fix *)
-    apply T_Fix.
-    replace (T0 :: G' ++ [U]) with ((T0 :: G') ++ [U]) by reflexivity.
-    apply (IHHty (T0 :: G')); auto.
-    simpl. reflexivity.
-    apply shift_preserves_typing. auto.
-  - apply T_Ref; apply IHHty with (G := G'); auto.
-  - apply T_Deref; apply IHHty with (G := G'); auto.
-  - apply T_Assign with T; [apply IHHty1 with (G := G') | apply IHHty2 with (G := G')]; auto.
+  - apply T_Succ; eauto.
+  - apply T_Pred; eauto.
+  - apply T_IsZero; eauto.
+  - apply T_If; eauto.
+  - apply T_Lam. replace (T1 :: G' ++ [U]) with ((T1 :: G') ++ [U]) in Hty by reflexivity. apply (IHHty (T1 :: G')); auto. simpl. apply shift_typing. exact Hs'.
+  - eapply T_App; eauto.
+  - apply T_Fix. replace (T0 :: G' ++ [U]) with ((T0 :: G') ++ [U]) in Hty by reflexivity. apply (IHHty (T0 :: G')); auto. simpl. apply shift_typing. exact Hs'.
+  - apply T_Ref; eauto.
+  - apply T_Deref; eauto.
+  - eapply T_Assign; eauto.
   - apply T_Loc. exact H.
 Qed.
 
-(** * Type Preservation *)
+
+Lemma has_type_store_weakening : forall G S S2 t T, has_type G S t T -> has_type G (S ++ S2) t T.
+Proof.
+intros G S S2 t T Hty. induction Hty; eauto using has_type. apply T_Loc. rewrite nth_error_app1; auto. apply nth_error_Some. rewrite H. discriminate.
+Qed.
+
+
+
+Lemma heap_ok_store_weakening : forall mu S S2, heap_ok mu S -> heap_ok mu (S ++ S2).
+Proof.
+  intros mu S S2 Hok. induction Hok.
+  - constructor.
+  - apply heap_cons with (T := T); auto.
+    + apply IHHok.
+    + apply has_type_store_weakening with (S := S); auto.
+    + apply nth_error_Some in H0. rewrite nth_error_app1; auto.
+Qed.
+
+Lemma heap_ok_length : forall mu S, heap_ok mu S -> length mu = length S.
+Proof.
+  intros mu S Hok. induction Hok; simpl; auto.
+  apply nth_error_Some in H0. rewrite <- IHHok. lia.
+Qed.
 
 Theorem preservation :
   forall t mu t' mu' T S,
@@ -232,36 +207,28 @@ Theorem preservation :
       heap_ok mu' S' /\
       has_type [] S' t' T.
 Proof.
-  intros t mu t' mu' T S Hty Hstep Hok.
+intros t mu t' mu' T S Hty Hstep Hok.
   revert T S Hty Hok.
   induction Hstep; intros T0 S Hty Hok.
-  - (* S_Succ *) inversion Hty; subst. destruct (IHHstep TyNat S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_PredZero *) inversion Hty; subst. exists S; eauto.
-  - (* S_PredSucc *) inversion Hty; subst. exists S; eauto.
-  - (* S_Pred *) inversion Hty; subst. destruct (IHHstep TyNat S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_IsZeroZero *) inversion Hty; subst. exists S; eauto.
-  - (* S_IsZeroSucc *) inversion Hty; subst. exists S; eauto.
-  - (* S_IsZero *) inversion Hty; subst. destruct (IHHstep TyNat S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_IfTrue *) inversion Hty; subst. exists S; eauto.
-  - (* S_IfFalse *) inversion Hty; subst. exists S; eauto.
-  - (* S_If *) inversion Hty; subst. destruct (IHHstep TyBool S H3 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_App1 *) inversion Hty; subst. destruct (IHHstep (TyArrow T1 T0) S H3 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_App2 *) inversion Hty; subst. destruct (IHHstep T1 S H5 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_AppAbs *)
-    inversion Hty; subst. inversion H0; subst.
-    exists S. unfold extends. exists []. split; [apply app_nil_r|].
-    split; [exact Hok|].
-    eapply substitution_preserves_typing with (G := []); simpl; eauto.
-  - (* S_Fix *)
-    inversion Hty; subst.
-    exists S. unfold extends. exists []. split; [apply app_nil_r|].
-    split; [exact Hok|].
-    eapply substitution_preserves_typing with (G := []); simpl; eauto.
-  - (* S_Ref *) inversion Hty; subst. destruct (IHHstep T0 S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_RefV *) inversion Hty; subst. inversion H0; subst. exists (S ++ [T0]). unfold extends. repeat split; eauto. { exists [T0]. reflexivity. } { induction Hok. constructor. eapply heap_cons with (T := T). apply IHHok. apply H1. apply nth_error_app_l. apply H3. } { apply T_Loc. apply nth_error_last. }
-  - (* S_Deref *) inversion Hty; subst. destruct (IHHstep (TyRef T0) S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_DerefLoc *) inversion Hty; subst. inversion H0; subst. induction Hok; simpl in *. discriminate. destruct (Nat.eqb l l0) eqn:Heq. injection H; intros; subst. exists S; eauto. apply IHHok; auto.
-  - (* S_Assign1 *) inversion Hty; subst. destruct (IHHstep (TyRef T1) S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_Assign2 *) inversion Hty; subst. destruct (IHHstep T1 S H4 Hok) as [S' [? [? ?]]]. exists S'; eauto.
-  - (* S_AssignV *) inversion Hty; subst. inversion H0; subst. exists S. repeat split; eauto. { induction Hok. constructor. destruct (Nat.eqb l0 l) eqn:Heq. subst. rewrite Nat.eqb_refl. apply heap_cons with (T := T0); auto. rewrite H3 in H1. injection H1; intros; subst; auto. rewrite Nat.eqb_sym. rewrite Heq. apply heap_cons with (T := T); auto. } { apply T_Num. }
+  - (* S_Succ *) inversion Hty; subst. destruct (IHHstep TyNat S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_Succ.
+  - (* S_PredZero *) inversion Hty; subst. exists S; repeat split; eauto using T_Num. unfold extends; exists []; symmetry; apply app_nil_r.
+  - (* S_PredSucc *) inversion Hty; subst. exists S; repeat split; eauto using T_Num. unfold extends; exists []; symmetry; apply app_nil_r.
+  - (* S_Pred *) inversion Hty; subst. destruct (IHHstep TyNat S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_Pred.
+  - (* S_IsZeroZero *) inversion Hty; subst. exists S; repeat split; eauto using T_Bool. unfold extends; exists []; symmetry; apply app_nil_r.
+  - (* S_IsZeroSucc *) inversion Hty; subst. exists S; repeat split; eauto using T_Bool. unfold extends; exists []; symmetry; apply app_nil_r.
+  - (* S_IsZero *) inversion Hty; subst. destruct (IHHstep TyNat S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_IsZero.
+  - (* S_IfTrue *) inversion Hty; subst. exists S; repeat split; eauto. unfold extends; exists []; symmetry; apply app_nil_r.
+  - (* S_IfFalse *) inversion Hty; subst. exists S; repeat split; eauto. unfold extends; exists []; symmetry; apply app_nil_r.
+  - (* S_If *) inversion Hty; subst. destruct (IHHstep TyBool S H3 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_If.
+  - (* S_App1 *) inversion Hty; subst. destruct (IHHstep (TyArrow T1 T0) S H3 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_App.
+  - (* S_App2 *) inversion Hty; subst. destruct (IHHstep T1 S H5 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_App.
+  - (* S_AppAbs *) inversion Hty; subst. inversion H4; subst. exists S; split; [unfold extends; exists []; symmetry; apply app_nil_r|]. split; [exact Hok|]. eapply substitution_preserves_typing with (G := []); simpl; eauto.
+  - (* S_Fix *) inversion Hty; subst. exists S; split; [unfold extends; exists []; symmetry; apply app_nil_r|]. split; [exact Hok|]. eapply substitution_preserves_typing with (G := []); simpl; eauto.
+  - (* S_Ref *) inversion Hty; subst. destruct (IHHstep T0 S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_Ref.
+  - (* S_RefV *) inversion Hty; subst. exists (S ++ [T]). split; [unfold extends; exists [T]; reflexivity|]. split. { apply heap_cons with (T := T). apply heap_ok_store_weakening; auto. apply has_type_store_weakening; auto. rewrite nth_error_app2 by (rewrite heap_ok_length with (S := S); auto; lia). rewrite heap_ok_length with (S := S); auto. rewrite Nat.sub_diag; reflexivity. } { apply T_Loc. rewrite nth_error_app2 by (rewrite heap_ok_length with (S := S); auto; lia). rewrite heap_ok_length with (S := S); auto. rewrite Nat.sub_diag; reflexivity. }
+  - (* S_Deref *) inversion Hty; subst. destruct (IHHstep (TyRef T0) S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_Deref.
+  - (* S_DerefLoc *) inversion Hty; subst. inversion H0; subst. exists S; split; [unfold extends; exists []; symmetry; apply app_nil_r|]. split; [exact Hok|]. induction Hok; simpl in H. discriminate. destruct (Nat.eqb l l0) eqn:Heq. apply Nat.eqb_eq in Heq; subst; rewrite Nat.eqb_refl in H; injection H; intros; subst. rewrite H3 in H1; injection H1; intros; subst. exact H0. apply IHHok; rewrite Heq in H; exact H.
+  - (* S_Assign1 *) inversion Hty; subst. destruct (IHHstep (TyRef T1) S H2 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_Assign.
+  - (* S_Assign2 *) inversion Hty; subst. destruct (IHHstep T1 S H4 Hok) as [S' [? [? ?]]]. exists S'; eauto using T_Assign.
+  - (* S_AssignV *) inversion Hty; subst. inversion H0; subst. exists S; split; [unfold extends; exists []; symmetry; apply app_nil_r|]. split. { induction Hok. constructor. simpl; destruct (Nat.eqb l l0) eqn:Heq. apply Nat.eqb_eq in Heq; subst; apply heap_cons with (T := T1); auto; rewrite H2 in H3; injection H3; intros; subst; exact H4. apply heap_cons with (T := T); auto. } { apply T_Num. }
 Qed.

@@ -1,11 +1,11 @@
 {
-  "name": "rocq-robot",
+  "name": "rocq-piler",
   "version": "0.6.0",
   "description": "MCP server for Rocq proof assistant integration via rocq-lsp - your AI companion for theorem proving",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "rocq-robot": "dist/index.js"
+    "rocq-piler": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",

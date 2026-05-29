@@ -1,5 +1,5 @@
 /**
- * Integration tests for all rocq-robot MCP tools.
+ * Integration tests for all rocq-piler MCP tools.
  *
  * Spins up the real MCP server (dist/index.js + coq-lsp) and exercises
  * every tool and every significant mode. One server process per suite.
@@ -382,10 +382,10 @@ describe('undo_step', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// list_admitted + replace_admit
+// list_admitted + insert_tactic admit_hash
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('list_admitted + replace_admit', () => {
+describe('list_admitted + insert_tactic admit_hash', () => {
   let tmpFile: string;
 
   beforeAll(async () => {
@@ -403,24 +403,214 @@ describe('list_admitted + replace_admit', () => {
     expect(hashes.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('replace_admit opens the bullet for a given hash', async () => {
+  it('insert_tactic with admit_hash replaces the admit in-place', async () => {
     const list = await h.callTool('list_admitted', { file: tmpFile, name: 'has_admits' });
     const hash = list.text.match(/[0-9a-f]{8}/)![0];
 
-    const r = await h.callTool('replace_admit', { file: tmpFile, name: 'has_admits', hash });
+    const r = await h.callTool('insert_tactic', { file: tmpFile, name: 'has_admits', tactic: 'exact I.', admit_hash: hash });
     expect(r.isError).toBe(false);
-    // Returns something like "removed admit." or "replaced" — admit line is gone
-    expect(r.text).toMatch(/removed|replaced/i);
+    expect(r.text).toMatch(/replaced/i);
     // The file should have one fewer admit. line
     const content = fs.readFileSync(tmpFile, 'utf8');
     const admitLines = content.split('\n').filter(l => /^\s*- admit\./.test(l));
     expect(admitLines.length).toBeLessThan(2);
   });
 
-  it('replace_admit with unknown hash returns error', async () => {
-    const r = await h.callTool('replace_admit', { file: tmpFile, name: 'has_admits', hash: 'deadbeef' });
+  it('insert_tactic with unknown admit_hash returns error', async () => {
+    const r = await h.callTool('insert_tactic', { file: tmpFile, name: 'has_admits', tactic: 'exact I.', admit_hash: 'deadbeef' });
     expect(r.isError).toBe(true);
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// insert_tactic multi-line (no sub-tactic splitting)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('insert_tactic multi-line', () => {
+  let tmpFile: string;
+
+  beforeAll(async () => {
+    tmpFile = tempFixture('basic.v', 'multiline');
+    await h.callTool('check_file', { file: tmpFile });
+  }, TIMEOUT);
+
+  afterAll(() => removeTempFixture(tmpFile));
+
+  it('inserts a multi-line tactic block where second tactic depends on first', async () => {
+    // with_hyp: forall n, n = n — needs intros then reflexivity.
+    // Previously the sub-tactic splitter would try to validate "reflexivity."
+    // against the pre-intros state and fail. Now the whole block goes in at once.
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'with_hyp',
+      tactic: 'intros n.\n  reflexivity.',
+    });
+    expect(r.isError).toBe(false);
+    expect(r.text).toMatch(/inserted/i);
+    // File should now contain the two tactics and no Admitted goals open
+    const content = fs.readFileSync(tmpFile, 'utf8');
+    expect(content).toContain('intros n.');
+    expect(content).toContain('reflexivity.');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// insert_tactic auto-Qed
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('insert_tactic auto-Qed', () => {
+  let tmpFile: string;
+
+  beforeAll(async () => {
+    tmpFile = tempFixture('basic.v', 'autoqed');
+    await h.callTool('check_file', { file: tmpFile });
+  }, TIMEOUT);
+
+  afterAll(() => removeTempFixture(tmpFile));
+
+  it('auto-replaces Admitted with Qed when proof is fully closed', async () => {
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'trivial',
+      tactic: 'exact I.',
+    });
+    expect(r.isError).toBe(false);
+    const content = fs.readFileSync(tmpFile, 'utf8');
+    const trivialBlock = content.match(/Lemma trivial : True\.\nProof\.\n([^\n]*)\n(Qed\.|Admitted\.)/)?.[0];
+    expect(trivialBlock).toBeDefined();
+    expect(trivialBlock).toContain('Qed.');
+    expect(trivialBlock).not.toContain('Admitted');
+  });
+
+  it('auto-replaces Admitted with Qed for multi-subgoal induction proof', async () => {
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'conjunction',
+      tactic: 'split; exact I.',
+    });
+    expect(r.isError).toBe(false);
+    const content = fs.readFileSync(tmpFile, 'utf8');
+    const conjBlock = content.match(/Lemma conjunction : True \/\\ True\.\nProof\.\n([^\n]*)\n(Qed\.|Admitted\.)/)?.[0];
+    expect(conjBlock).toBeDefined();
+    expect(conjBlock).toContain('Qed.');
+    expect(conjBlock).not.toContain('Admitted');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// insert_tactic admit_hash re-seal
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('insert_tactic admit_hash re-seal', () => {
+  it('replaces admit in a partial bullet: intros. admit. → intros. exact I.', async () => {
+    const tmpFile = tempFixture('partial_bullet.v', 'seal1');
+    await h.callTool('check_file', { file: tmpFile });
+
+    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'partial_bullet' });
+    // Fixture: second bullet already closed, first bullet has "intros. admit."
+    const hash = list.text.match(/[0-9a-f]{8}/)![0];
+
+    // Replace only the admit. with the closing tactic
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'partial_bullet',
+      tactic: 'exact I.',
+      admit_hash: hash,
+    });
+    expect(r.isError).toBe(false);
+    expect(r.text).toMatch(/replaced/);
+
+    const content = fs.readFileSync(tmpFile, 'utf8');
+    // First bullet should now be: intros. exact I. — no admit re-sealed inside
+    expect(content).toMatch(/- intros\. exact I\./);
+    // File should be fully closed — Qed. not Admitted.
+    expect(content).toContain('Qed.');
+    expect(content).not.toMatch(/Admitted\./);
+
+    removeTempFixture(tmpFile);
+  }, TIMEOUT);
+
+  it('re-seals with admit inside bullet when tactic is non-closing (split.)', async () => {
+    const tmpFile = tempFixture('nested_conj.v', 'split_seal');
+    await h.callTool('check_file', { file: tmpFile });
+
+    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'nested_conj' });
+    const firstHash = list.text.match(/[0-9a-f]{8}/)![0];
+
+    // bullet 1 goal is True /\ True. split. creates 2 subgoals — doesn't close.
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'nested_conj',
+      tactic: 'split.',
+      admit_hash: firstHash,
+    });
+    expect(r.isError).toBe(false);
+    expect(r.text).toMatch(/sealed with admit/);
+
+    const content = fs.readFileSync(tmpFile, 'utf8');
+    // First bullet: split. then re-sealed admit inside — second bullet intact
+    expect(content).toMatch(/- split\.\n\s+admit\./);
+    expect(content).toMatch(/\n  - admit\./); // second bullet still admitted
+
+    removeTempFixture(tmpFile);
+  }, TIMEOUT);
+
+  it('response includes 0 remaining and Qed when proof fully closed', async () => {
+    const tmpFile = tempFixture('partial_bullet.v', 'remaining1');
+    await h.callTool('check_file', { file: tmpFile });
+
+    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'partial_bullet' });
+    const hash = list.text.match(/[0-9a-f]{8}/)![0];
+
+    // Close the only admit — proof should complete
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'partial_bullet',
+      tactic: 'exact I.',
+      admit_hash: hash,
+    });
+    expect(r.isError).toBe(false);
+    // Qed applied — no remaining admits to report
+    expect(r.text).toMatch(/Qed applied/);
+    expect(r.text).not.toMatch(/admit\(s\) remaining/);
+
+    removeTempFixture(tmpFile);
+  }, TIMEOUT);
+
+  it('response includes remaining admits after non-closing replacement', async () => {
+    const tmpFile = tempFixture('nested_conj.v', 'remaining2');
+    await h.callTool('check_file', { file: tmpFile });
+
+    const list = await h.callTool('list_admitted', { file: tmpFile, name: 'nested_conj' });
+    const firstHash = list.text.match(/[0-9a-f]{8}/)![0];
+
+    // Replace bullet 1 admit with split. — non-closing, re-seals
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'nested_conj',
+      tactic: 'split.',
+      admit_hash: firstHash,
+    });
+    expect(r.isError).toBe(false);
+    // 2 remaining: re-sealed admit in bullet 1, original admit in bullet 2
+    expect(r.text).toMatch(/2 admit\(s\) remaining/);
+    // Both have hashes
+    const remainingHashes = [...r.text.matchAll(/([0-9a-f]{8})\s+L/g)].map(m => m[1]);
+    expect(remainingHashes.length).toBe(2);
+
+    // Use the inline hash to close bullet 2 directly — no extra list_admitted needed
+    const secondHash = remainingHashes.find(h => h !== firstHash) ?? remainingHashes[1];
+    const r2 = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'nested_conj',
+      tactic: 'exact I.',
+      admit_hash: secondHash,
+    });
+    expect(r2.isError).toBe(false);
+    expect(r2.text).toMatch(/replaced/);
+
+    removeTempFixture(tmpFile);
+  }, TIMEOUT);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

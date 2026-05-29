@@ -1,5 +1,5 @@
 /**
- * Integration test harness for rocq-robot MCP tools.
+ * Integration test harness for rocq-piler MCP tools.
  *
  * Uses the official MCP SDK client (StdioClientTransport) to spawn and
  * communicate with the real dist/index.js server process.

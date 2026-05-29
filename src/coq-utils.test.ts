@@ -591,11 +591,7 @@ describe('stale LSP: edit_file removal clears LSP bindings', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// ISSUE: list_admitted + replace_admit — navigate & reopen admitted bullets
-// ═══════════════════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════════════════
-// list_admitted + replace_admit — use real production functions
+// list_admitted — navigate admitted bullets
 // ═══════════════════════════════════════════════════════════════════
 
 describe('proofBounds', () => {
@@ -716,17 +712,7 @@ describe('admitPrefix', () => {
   });
 });
 
-describe('replace_admit preserves bullet', () => {
-  function replaceAdmitPreserve(text: string, line: number): string {
-    const lines = text.split('\n');
-    const prefix = admitPrefix(lines[line]);
-    const newLine = prefix ? prefix.trim() : '';
-    return applyTextEdits(text, [{
-      range: { start: { line, character: 0 }, end: { line: line + 1, character: 0 } },
-      newText: newLine ? `${newLine}\n` : '',
-    }]);
-  }
-
+describe('replaceAdmitLine: insert_tactic admit_hash replacement', () => {
   const proof = [
     'Theorem foo : nat.',
     'Proof.',
@@ -736,21 +722,29 @@ describe('replace_admit preserves bullet', () => {
     'Admitted.',
   ].join('\n');
 
-  it('keeps - bullet after removing admit', () => {
+  it('replaces admit. with tactic, preserving bullet prefix', () => {
     const admits = findAdmitLines(proof.split('\n'), 1, 5);
     expect(admits).toHaveLength(1);
-    const after = replaceAdmitPreserve(proof, admits[0]);
-    expect(after).toContain('-');
+    const after = replaceAdmitLine(proof, admits[0], 'exact I.');
+    expect(after).toContain('- exact I.');
     expect(after).not.toContain('admit.');
   });
 
-  it('next insert_tactic would land at bullet marker position', () => {
-    const admits = findAdmitLines(proof.split('\n'), 1, 5);
-    const after = replaceAdmitPreserve(proof, admits[0]);
-    const lines = after.split('\n');
-    const bulletLine = lines.findIndex(l => l.trim() === '-');
-    expect(bulletLine).toBeGreaterThan(0);
-    expect(lines[bulletLine].trim()).toBe('-');
+  it('works for nested bullet prefixes', () => {
+    const nested = [
+      'Theorem bar : nat.',
+      'Proof.',
+      '  split.',
+      '  + split.',
+      '    * admit.',
+      '    * reflexivity.',
+      'Admitted.',
+    ].join('\n');
+    const admits = findAdmitLines(nested.split('\n'), 1, 6);
+    expect(admits).toHaveLength(1);
+    const after = replaceAdmitLine(nested, admits[0], 'exact O.');
+    expect(after).toContain('    * exact O.');
+    expect(after).not.toContain('admit.');
   });
 });
 

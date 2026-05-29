@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { McpHarness, createHarness, removeTempFixture, tempFixture } from './harness.js';
+import { McpHarness, createHarness, removeTempFixture, tempFixture, fixture } from './harness.js';
 
 const TIMEOUT = 90_000;
 
@@ -22,22 +22,21 @@ afterAll(async () => {
 });
 
 describe('list_admitted on preservation', () => {
-  const PCF_REF = '/home/gavin/dev/Scidonia/rocq-robot/examples/pcf_ref.v';
+  const FIXTURE = fixture('preservation_stubs.v');
 
   // Warm up the file
   beforeAll(async () => {
-    await h.callTool('check_file', { file: PCF_REF });
+    await h.callTool('check_file', { file: FIXTURE });
   }, TIMEOUT);
 
   it('finds 21 admits', async () => {
-    const r = await h.callTool('list_admitted', { file: PCF_REF, name: 'preservation' });
+    const r = await h.callTool('list_admitted', { file: FIXTURE, name: 'preservation' });
     expect(r.isError).toBe(false);
     expect(r.text).toMatch(/21 admit/);
   });
 
   it('returns real hashes for bullet admits, not error', async () => {
-    const r = await h.callTool('list_admitted', { file: PCF_REF, name: 'preservation' });
-    // Each admit line should have a real 8-char hex hash, not "error"
+    const r = await h.callTool('list_admitted', { file: FIXTURE, name: 'preservation' });
     const hashLines = r.text.split('\n').filter(l => /^[0-9a-f]{8}\s/.test(l));
     expect(hashLines).toHaveLength(21);
     const errorLines = r.text.split('\n').filter(l => l.startsWith('error'));
@@ -45,8 +44,7 @@ describe('list_admitted on preservation', () => {
   });
 
   it('at least one admit shows a goal text', async () => {
-    const r = await h.callTool('list_admitted', { file: PCF_REF, name: 'preservation' });
-    // Goal text should appear after "Ln: " for at least some admits
+    const r = await h.callTool('list_admitted', { file: FIXTURE, name: 'preservation' });
     const goalLines = r.text.split('\n').filter(l => /:\s+\S/.test(l));
     expect(goalLines.length).toBeGreaterThan(0);
   });
@@ -56,14 +54,13 @@ describe('insert_tactic admit_hash on preservation', () => {
   let tmpFile: string;
 
   beforeAll(async () => {
-    tmpFile = tempFixture('pcf_ref.v', 'preserv', '/home/gavin/dev/Scidonia/rocq-robot/examples');
+    tmpFile = tempFixture('preservation_stubs.v', 'preserv');
     await h.callTool('check_file', { file: tmpFile });
   }, TIMEOUT);
 
   afterAll(() => removeTempFixture(tmpFile));
 
   it('replaces first admit line via admit_hash', async () => {
-    // List admits and get the first real hash
     const list = await h.callTool('list_admitted', { file: tmpFile, name: 'preservation' });
     const hash = list.text.match(/^([0-9a-f]{8})\s/m)?.[1];
     expect(hash).toBeTruthy();
@@ -75,7 +72,6 @@ describe('insert_tactic admit_hash on preservation', () => {
       admit_hash: hash,
     });
     expect(r.isError).toBe(false);
-    // Should have replaced some admits
     expect(r.text).toMatch(/replaced/);
   });
 });

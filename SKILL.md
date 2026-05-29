@@ -112,16 +112,42 @@ require_lib file="path/file.v" lib="Coq.Lists.List"
 search_lemmas file="path/file.v" pattern="(_ ++ [])"  # Now finds app_nil_r
 ```
 
-### 6. Add lemmas only when needed
+### 6. Recognising when a bullet needs a lemma
 
-When a case fails because a helper property is truly missing (not in standard libraries), add it with `add_lemma`:
+When `insert_tactic admit_hash` re-seals repeatedly with the same goal — or when
+`try_step` on the remaining goal says a name is not found — the bullet needs a
+helper lemma that isn't in scope yet.
 
-```coq
-add_lemma name="my_lemma" statement="forall x, P x"
-              before="main_theorem" file="path/file.v"
-```
+**Diagnostic**: use `try_step` on the re-sealed admit to see the full hypothesis
+context. If the goal mentions a term (e.g. `S'` extending `S`) but the hypotheses
+only provide facts about `S`, you need a weakening/monotonicity lemma.
 
-Then prove the lemma before returning to the main theorem.
+**Workflow**:
+
+1. Note the missing property from `try_step` output.
+2. Check if it already exists:
+   ```
+   search_lemmas pattern="has_type (_ ++ _)"
+   search_lemmas pattern="heap_ok (_ ++ _)"
+   ```
+3. If not found, add it with `add_lemma` **before** the main theorem:
+   ```
+   add_lemma name="has_type_store_weakening"
+             statement="forall G S S2 t T, has_type G S t T -> has_type G (S ++ S2) t T"
+             before="preservation"
+   ```
+4. Prove the helper with `insert_tactic` (often a one-liner: `intros; induction Hty; eauto using has_type.`).
+5. Return to the main proof — the lemma is now in scope. Use the hash from the
+   last `insert_tactic` response (no fresh `list_admitted` needed) to continue.
+
+**Common helpers for preservation proofs**:
+
+| Lemma | When needed |
+|-------|-------------|
+| `has_type_store_weakening` | Any bullet where `S'` extends `S` and you need typing facts from `S` to hold in `S'` (S_If, S_App1, S_App2, S_Deref, S_Assign1, S_Assign2) |
+| `heap_ok_store_weakening` | S_RefV: need `heap_ok mu (S ++ [T])` |
+| `heap_ok_length` | S_RefV: need `length mu = length S` to place new location |
+| `substitution_preserves_typing` | S_AppAbs, S_Fix: beta-reduction preserves typing |
 
 ## Bullet System
 
@@ -368,3 +394,27 @@ Use `replace: true` to undo the last insertion and retry:
 ```coq
 insert_tactic name="my_theorem" tactic="reflexivity." file="path/file.v" replace=true
 ```
+
+### Placing bullet skeletons for partial proofs
+
+An empty bullet `- (* comment *)` is a **syntax error** in Coq — every bullet must have at least one tactic. When sketching a multi-case proof with some cases not yet filled in, use `admit.` as a placeholder body:
+
+```coq
+- (* S_AppAbs *) admit.
+- (* S_Fix *)    admit.
+- (* S_RefV *)   admit.
+```
+
+Use `edit_file` with `find`/`replace` to insert the full skeleton at once, then `list_admitted` to enumerate the stubs and work through them with `insert_tactic` + `admit_hash`.
+
+### Multi-line tactics in `insert_tactic`
+
+`insert_tactic` writes the full tactic string to the file as-is — multi-line blocks, sequences of `.`-terminated tactics, and `;`-chains all work:
+
+```coq
+insert_tactic tactic="inversion Hty; subst.
+  destruct (IHHstep TyNat S H2 Hok) as [S' [? [? ?]]].
+  exists S'; eauto using T_Succ."
+```
+
+coq-lsp validates the whole block atomically and returns the resulting goal state.

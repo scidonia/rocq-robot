@@ -81,6 +81,30 @@ Should only show `Lemma`/`Theorem` items with Qed/Admitted status.
 
 (none)
 
+### MEDIUM (new)
+
+**M8. No guidance when `insert_tactic admit_hash` stalls on a missing lemma**
+When a bullet repeatedly re-seals with the same goal, the tool gives no hint that
+a helper lemma is needed. The caller only discovers this by running `try_step` and
+seeing "not found in the current environment".
+*Fix: when the re-sealed admit hash equals the just-replaced admit hash (same goal
+repeated), emit a diagnostic: "goal unchanged — a helper lemma may be needed.
+Use try_step to inspect the context, then add_lemma before this proof."*
+
+## Backlog (new)
+
+### MEDIUM
+
+**M6. `insert_tactic` multi-line split — Fixed**
+Sub-tactic splitting and per-sub-tactic speculative validation removed. `insert_tactic`
+now writes the full tactic string to the file as-is and lets coq-lsp validate atomically.
+
+**M7. `replace_admit` removed — superseded by `insert_tactic admit_hash`**
+`replace_admit` was a two-step tool that removed `admit.` (leaving an empty bullet,
+a syntax error) and asked the caller to follow up with `insert_tactic`. Since
+`insert_tactic` already accepts `admit_hash` and performs the full atomic
+replacement, `replace_admit` was redundant and broken. Removed.
+
 ## Done
 
 - [x] **D1.** Template file `test_templates/pcf_ref.v` — all Admitted stub for testing

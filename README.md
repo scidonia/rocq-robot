@@ -1,4 +1,4 @@
-# 🤖 rocq-robot
+# 🤖 rocq-piler
 
 **Neurosymbolic Programming with Rocq LSP**
 
@@ -184,7 +184,7 @@ This MCP (Model Context Protocol) server implements the LSP bridge:
               │ MCP Protocol
               │ (tool calls)
 ┌─────────────▼────────────────────────┐
-│  rocq-robot                          │
+│  rocq-piler                          │
 │  • Exposes 20+ MCP tools             │
 │  • Manages document state            │
 │  • Handles LSP ↔ MCP translation     │
@@ -316,7 +316,7 @@ coq-lsp --version  # or rocq-lsp --version
 
 ### Installation
 ```bash
-cd rocq-robot
+cd rocq-piler
 npm install
 npm run build
 ```
@@ -327,10 +327,10 @@ Add to your MCP settings:
 ```json
 {
   "mcpServers": {
-    "rocq-robot": {
+    "rocq-piler": {
       "command": "node",
       "args": [
-        "/path/to/rocq-robot/dist/index.js",
+        "/path/to/rocq-piler/dist/index.js",
         "--workspace-root",
         "/path/to/your/rocq/project"
       ]
