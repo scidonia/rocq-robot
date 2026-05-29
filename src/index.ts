@@ -916,9 +916,9 @@ async function main() {
     doc: { uri: string; text: string },
     docLines: string[],
     bounds: { proofLine: number; endLine: number },
-  ): Promise<Array<{ hash: string; line: number; goal: string }>> {
+  ): Promise<Array<{ hash: string; line: number; goal: string; hyps: string }>> {
     const admitLineNums = findAdmitLines(docLines, bounds.proofLine, bounds.endLine);
-    const admitted: Array<{ hash: string; line: number; goal: string }> = [];
+    const admitted: Array<{ hash: string; line: number; goal: string; hyps: string }> = [];
     for (const line of admitLineNums) {
       try {
         const { snapLine, snapChar } = admitSnapPosition(docLines, line, bounds.proofLine);
@@ -927,14 +927,31 @@ async function main() {
             uri: doc.uri, position: { line: snapLine, character: snapChar }, opts: { memo: false },
           })
         );
+        // Use compact: true for reliable goal extraction (hash computation)
         const goalsR = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
           st: stateR.st, opts: { compact: true },
         });
-        const goalText = (goalsR.goals || []).map((g: any) => (g.ty || '').replace(/\s+/g, ' ')).join(' | ');
+        const goals = goalsR.goals || [];
+        const goalText = goals.map((g: any) => (g.ty || '').replace(/\s+/g, ' ')).join(' | ');
         const hash = createHash('md5').update(goalText).digest('hex').slice(0, 8);
-        admitted.push({ hash, line: line + 1, goal: goalText || '(no goals)' });
+        // Also fetch hypotheses with compact: false for display
+        let hyps = '';
+        try {
+          const goalsFullR = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
+            st: stateR.st, opts: { compact: false },
+          });
+          const fullGoal = (goalsFullR.goals || [])[0];
+          if (fullGoal?.hyps) {
+            hyps = (fullGoal.hyps as any[]).map((h: any) => {
+              const names = Array.isArray(h.names) ? h.names.join(', ') : (h.name || '?');
+              const ty = (h.ty || '').replace(/\s+/g, ' ');
+              return `${names} : ${ty}`;
+            }).join('; ');
+          }
+        } catch {}
+        admitted.push({ hash, line: line + 1, goal: goalText || '(no goals)', hyps });
       } catch {
-        admitted.push({ hash: 'error', line: line + 1, goal: '(could not query)' });
+        admitted.push({ hash: 'error', line: line + 1, goal: '(could not query)', hyps: '' });
       }
     }
     return admitted;
@@ -1120,16 +1137,20 @@ async function main() {
             scriptLines.forEach(l => parts.push(`  ${l}`));
           }
 
-          // Admits section
+          // Admits section — hash, hypotheses, and goal for each open admit
           if (admitted.length > 0) {
             parts.push('');
             parts.push(`-- admits (${admitted.length}) ----------`);
             admitted.forEach(a => {
               const nGoals = a.goal ? a.goal.split(' | ').length : 1;
               const isRootAdmitted = (docLines[a.line - 1] || '').trim() === 'Admitted.';
-              parts.push(`  ${a.hash}  L${a.line}: ${a.goal}`);
+              parts.push(`  ${a.hash}  L${a.line}:`);
+              if (a.hyps) {
+                parts.push(`    hyps: ${a.hyps}`);
+              }
+              parts.push(`    goal: ${a.goal}`);
               if (isRootAdmitted && nGoals > 1) {
-                parts.push(`  ^ ${nGoals} focused goals — insert ${nGoals} bulleted admits (-) to address each individually, then use their hashes`);
+                parts.push(`    ^ ${nGoals} focused goals — insert ${nGoals} bulleted admits (-) to address each individually, then use their hashes`);
               }
             });
           }
@@ -1577,29 +1598,43 @@ async function main() {
                   }
                 } catch {}
 
-                // Remaining admits
+                // Remaining admits — show hash, hyps, and goal for each
                 const admitLines = findAdmitLines(finalLines, finalBounds.proofLine, finalBounds.endLine);
                 if (admitLines.length > 0) {
                   const remaining: string[] = [];
                   for (const line of admitLines) {
                     try {
-                      const lineText = finalLines[line] || '';
-                      const admitIdx = lineText.search(/\badmit\b/);
-                      const character = admitIdx > 0 ? admitIdx - 1 : 0;
+                      const { snapLine, snapChar } = admitSnapPosition(finalLines, line, finalBounds.proofLine);
                       const stateR = await retryDocumentNotReady(() =>
                         lspClient.sendRequest<RunResult<number>>('petanque/get_state_at_pos', {
                           uri: finalDoc.uri,
-                          position: { line, character },
+                          position: { line: snapLine, character: snapChar },
                           opts: { memo: false },
                         })
                       );
                       const goalsR = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
-                        st: stateR.st,
-                        opts: { compact: true },
+                        st: stateR.st, opts: { compact: true },
                       });
-                      const goalText = (goalsR.goals || []).map((g: any) => (g.ty || '').replace(/\s+/g, ' ')).join(' | ');
+                      const goals = goalsR.goals || [];
+                      const goalText = goals.map((g: any) => (g.ty || '').replace(/\s+/g, ' ')).join(' | ');
                       const hash = createHash("md5").update(goalText).digest("hex").slice(0, 8);
-                      remaining.push(`${hash}  L${line + 1}: ${goalText || '(no goals)'}`);
+                      let hyps = '';
+                      try {
+                        const goalsFullR = await lspClient.sendRequest<GoalConfig<string>>('petanque/goals', {
+                          st: stateR.st, opts: { compact: false },
+                        });
+                        const fullGoal = (goalsFullR.goals || [])[0];
+                        if (fullGoal?.hyps) {
+                          hyps = (fullGoal.hyps as any[]).map((h: any) => {
+                            const names = Array.isArray(h.names) ? h.names.join(', ') : (h.name || '?');
+                            const ty = (h.ty || '').replace(/\s+/g, ' ');
+                            return `${names} : ${ty}`;
+                          }).join('; ');
+                        }
+                      } catch {}
+                      remaining.push(`${hash}  L${line + 1}:`);
+                      if (hyps) remaining.push(`  hyps: ${hyps}`);
+                      remaining.push(`  goal: ${goalText || '(no goals)'}`);
                     } catch {
                       remaining.push(`error  L${line + 1}: (could not query)`);
                     }

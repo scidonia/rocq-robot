@@ -594,11 +594,11 @@ describe('insert_tactic admit_hash re-seal', () => {
     expect(r.isError).toBe(false);
     // split. on True /\ True → 2 child admits + original bullet 2 = 3 remaining
     expect(r.text).toMatch(/3 admit\(s\) remaining/);
-    const remainingHashes = [...r.text.matchAll(/([0-9a-f]{8})\s+L/g)].map(m => m[1]);
-    expect(remainingHashes.length).toBe(3);
+    const remainingAdmits = extractAdmitHashes(r.text);
+    expect(remainingAdmits.length).toBe(3);
 
     // Use the last inline hash (bullet 2 — distinct goal True /\ True) to close it
-    const secondHash = remainingHashes[remainingHashes.length - 1];
+    const secondHash = remainingAdmits[remainingAdmits.length - 1].hash;
     const r2 = await h.callTool('insert_tactic', {
       file: tmpFile,
       name: 'nested_conj',
@@ -769,12 +769,12 @@ describe('deep_conj admit-split-close workflow', () => {
     });
     expect(splitR.isError).toBe(false);
     expect(splitR.text).toMatch(/sealed with 2 admits/);
-    const afterSplit = [...splitR.text.matchAll(/([0-9a-f]{8})\s+L/g)].map(m => m[1]);
+    const afterSplit = extractAdmitHashes(splitR.text);
     expect(afterSplit).toHaveLength(3);
 
     // Step 3: all 3 remaining admits have goal True — same hash, exact I. closes all → Qed
     const r2 = await h.callTool('insert_tactic', {
-      file: tmpFile, name: 'deep_conj', tactic: 'exact I.', admit_hash: afterSplit[0],
+      file: tmpFile, name: 'deep_conj', tactic: 'exact I.', admit_hash: afterSplit[0].hash,
     });
     expect(r2.isError).toBe(false);
     expect(r2.text).toMatch(/Qed applied/);
