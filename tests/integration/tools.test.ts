@@ -915,3 +915,62 @@ describe('insert_tactic admit_hash mode', () => {
     expect(r.text).toMatch(/deadbeef/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// insert_tactic auto-Qed regression: rewrite followed by { } blocks
+// produces "bullet closed (1 admitted)" instead of "done — Qed applied".
+// The { } blocks cause nGivenUp > 0 in the petanque API, blocking auto-Qed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('rewrite + { } blocks block auto-Qed', () => {
+  it('single { } after rewrite auto-Qeds', async () => {
+    const tmpFile = tempFixture('curly_shelve.v', 'rwcurly');
+    await h.callTool('check_file', { file: tmpFile });
+
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'rewrite_curly_single',
+      tactic: 'intro n. rewrite Nat.add_0_r. { reflexivity. }',
+    });
+    // Single { } block works — auto-Qeds fine.
+    expect(r.text).toMatch(/Qed applied|done/);
+    expect(r.text).not.toMatch(/admitted/);
+
+    removeTempFixture(tmpFile);
+  }, TIMEOUT);
+
+  it('rewrite without { } block auto-Qeds (baseline)', async () => {
+    const tmpFile = tempFixture('curly_shelve.v', 'rwnocurly');
+    await h.callTool('check_file', { file: tmpFile });
+
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'no_curly_baseline',
+      tactic: 'intro n. apply Nat.le_refl.',
+    });
+    expect(r.text).toMatch(/Qed applied|done/);
+
+    removeTempFixture(tmpFile);
+  }, TIMEOUT);
+
+  it('two { } blocks after rewrite now auto-Qeds (regression fixed)', async () => {
+    // Was a bug: rewrite generating subgoals handled by two { } blocks
+    // put the proof into "bullet closed (1 admitted)" state, blocking
+    // auto-Qed.  Now fixed — done goals reported by petanque are
+    // ignored; only text-level admit. lines block auto-Qed.
+    const tmpFile = tempFixture('curly_shelve.v', 'rw2curly');
+    await h.callTool('check_file', { file: tmpFile });
+
+    const r = await h.callTool('insert_tactic', {
+      file: tmpFile,
+      name: 'rewrite_curly_double',
+      tactic: 'intros l1 l2 n x Hlen Hnth. rewrite nth_error_app1. { exact Hnth. } { exact Hlen. }',
+    });
+    console.log('two { } after rewrite output:', JSON.stringify(r.text));
+    // Fixed: now auto-Qeds correctly.
+    expect(r.text).toMatch(/Qed applied|done/);
+    expect(r.text).not.toMatch(/bullet closed.*admitted/);
+
+    removeTempFixture(tmpFile);
+  }, TIMEOUT);
+});

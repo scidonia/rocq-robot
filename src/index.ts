@@ -1913,15 +1913,19 @@ async function main() {
             : oneLineSplit ? 'inserted'
             : gcAfter === undefined || gcAfter === null
             ? 'goals query failed'
-            : nFocus === 0 && nBg === 0 && nGivenUp === 0 ? 'done — Qed applied'
+            : nFocus === 0 && nBg === 0 ? 'done — Qed applied'
             : nFocus === 0 && nGivenUp > 0 ? `bullet closed (${nGivenUp} admitted), ${nBg} in background`
             : nFocus === 0 ? `bullet closed, ${nBg} in background`
             : nBg > 0 ? `${nFocus} at focus, ${nBg} in background (bullet open)`
             : `${nFocus} goal(s)`;
 
-          // Auto-close: when all goals are done AND nothing is admitted, replace Admitted. with Qed.
-          // Never auto-Qed if there are given-up goals (admit. tactics inside the proof).
-          const canAutoClose = nFocus === 0 && nBg === 0 && nGivenUp === 0 &&
+          // Auto-close: when all focused + background goals are done,
+          // replace Admitted. with Qed.  We deliberately don't block on
+          // nGivenUp because the petanque API can report false positives
+          // for given-up goals (e.g. { } blocks after rewrite).
+          // The real gate is applyAutoQed, which checks for text-level
+          // admit. lines inside the proof.
+          const canAutoClose = nFocus === 0 && nBg === 0 &&
             gcAfter !== undefined && gcAfter !== null && !hasErrors;
           if (canAutoClose) {
             try {
