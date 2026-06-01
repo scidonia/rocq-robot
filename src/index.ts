@@ -1156,8 +1156,16 @@ async function main() {
           }
 
           const hint = nextHint(gc);
+          // If the proof file ends with Admitted. (not Qed.), never say
+          // "Proof complete" — the goals query returning 0 may be a stale
+          // state or a file-level error, not a genuine completion.
+          const isAdmitted = bounds
+            && (docLines[bounds.endLine] || '').trim() === 'Admitted.';
+          const safeHint = (isAdmitted && hint.startsWith('Proof complete'))
+            ? 'Proof is admitted — goals could not be queried.'
+            : hint;
           parts.push('');
-          parts.push(`next: ${hint}`);
+          parts.push(`next: ${safeHint}`);
 
           return reply(parts.join('\n'), {
             bullet,
